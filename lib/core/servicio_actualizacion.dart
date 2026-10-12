@@ -13,9 +13,15 @@ class ServicioActualizacion {
       final packageInfo = await PackageInfo.fromPlatform();
       final int versionCodeLocal = int.tryParse(packageInfo.buildNumber) ?? 1;
 
-      // 2. Consultar el nodo version_app en Firebase Realtime Database
-      final url = Uri.parse('$urlBaseDatos/version_app.json');
+      // Imprimir la versión local detectada para depurar
+      print('=== ACTUALIZACION: versionCodeLocal detectado -> $versionCodeLocal ===');
+
+      // 2. Consultar el nodo version_app en Firebase con token de autenticación
+      final url = Uri.parse('$urlBaseDatos/version_app.json?auth=lgkRfa27my9DXMXylPgcalgRXNP4X92rgarwkT6r');
       final respuesta = await http.get(url);
+
+      print('=== ACTUALIZACION: Status Code -> ${respuesta.statusCode} ===');
+      print('=== ACTUALIZACION: Body -> ${respuesta.body} ===');
 
       if (respuesta.statusCode == 200 && respuesta.body != 'null') {
         final Map<String, dynamic> datos = json.decode(respuesta.body);
@@ -24,14 +30,18 @@ class ServicioActualizacion {
         final String novedades = datos['novedades'] ?? 'Mejoras y correcciones generales.';
         final String versionName = datos['version_name'] ?? '1.0.0';
 
+        print('=== ACTUALIZACION: Remote Version -> $versionCodeRemoto, Local Version -> $versionCodeLocal ===');
+
         // 3. Si la versión remota es mayor, desplegar la ventana emergente
         if (versionCodeRemoto > versionCodeLocal && urlApk.isNotEmpty) {
           if (!context.mounted) return;
           _mostrarDialogoActualizacion(context, versionName, novedades, urlApk);
+        } else {
+          print('=== ACTUALIZACION: La versión remota no es mayor que la local. No se muestra diálogo. ===');
         }
       }
     } catch (e) {
-      debugPrint('Error comprobando actualización: $e');
+      print('=== ACTUALIZACION ERROR: $e ===');
     }
   }
 
