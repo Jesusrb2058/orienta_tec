@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  ota_update guarda el APK descargado en el almacenamiento INTERNO de la app:
+  <datos de la app>/files/ota_update/. El FileProvider necesita declarar
+  exactamente esa carpeta; si no, al terminar la descarga Android lanza
+  "Failed to find configured root" y la app se cierra.
+-->
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
-    <external-files-path name="files" path="."/>
+    <files-path name="internal_apk_storage" path="ota_update/"/>
 </paths>
