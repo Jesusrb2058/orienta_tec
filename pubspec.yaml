@@ -1,0 +1,51 @@
+name: orienta_tec
+description: "A new Flutter project."
+publish_to: 'none'
+
+version: 1.0.0+2
+
+environment:
+  sdk: ^3.13.4
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+  geolocator: ^14.1.1
+  flutter_map: ^8.3.2
+  latlong2: ^0.10.1
+  flutter_native_splash: ^2.4.1 # Mover a dependencies para usar FlutterNativeSplash.remove()
+  shared_preferences: ^2.3.2 # <--- Agregar esta línea
+  http: ^1.6.0 # Sincronización del mapa con el servidor
+  package_info_plus: ^10.2.2
+  ota_update: ^7.1.0
+
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.13.1
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/images/icono.jpeg"
+  min_sdk_android: 21
+
+
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/images/campus_orizaba.png
+    - assets/images/icono_chico.png
+flutter_native_splash:
+  color: "#FFFFFF"
+  image: assets/images/icon-inicio.png
+  android_12:
+    color: "#FFFFFF"
+    image: assets/images/icon-inicio.png
