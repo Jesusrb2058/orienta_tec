@@ -1,6 +1,9 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+import 'package:image_picker/image_picker.dart';
 import 'package:orienta_tec/core/servicio_actualizacion.dart';
 import 'package:flutter/foundation.dart' show ValueListenable, kDebugMode;
 import 'package:flutter/material.dart';
@@ -8,7 +11,6 @@ import 'package:flutter/services.dart' show SystemUiOverlayStyle;
 import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart' show LatLng;
-import 'package:flutter_native_splash/flutter_native_splash.dart';
 import 'package:orienta_tec/app/theme/tema_app.dart';
 import 'package:orienta_tec/core/mapa_datos.dart';
 import 'package:orienta_tec/core/mapa_repositorio.dart';
@@ -37,10 +39,6 @@ const String _textoAtribucion = _claveCarto == ''
     ? '© OpenStreetMap'
     : '© OpenStreetMap contributors, © CARTO';
 
-// Mapa oscuro. Sin clave usa los mismos tiles de OpenStreetMap que el modo
-// claro, invertidos y teñidos de azul marino (no necesita registro).
-// Opcional: con una clave gratuita de MapTiler (maptiler.com) se usa su estilo
-// oscuro real, con parques y agua de colores como Google Maps.
 const String _claveMapTiler = '';
 const String _urlTilesOscuro =
     'https://api.maptiler.com/maps/streets-v2-dark/{z}/{x}/{y}{r}.png?key=$_claveMapTiler';
@@ -63,7 +61,9 @@ const double _umbralDesvioM = 25;
 const double _radioLlegadaM = 12;
 
 const Rect _zonaCampus = Rect.fromLTWH(-260, -260, _imgW + 520, _imgH + 520);
-const double _zoomEtiquetas = 17.3;
+const double _zoomEtiquetas = 16.5;
+// A partir de este zoom cada salón se dibuja como una cajita dentro de su edificio.
+const double _zoomSalones = 18.6;
 
 // ---------------------------------------------------------------------------
 // Calibración fija
@@ -377,7 +377,7 @@ _Ruta _construirRuta(List<Offset> crudo, Salon destino, double mpp) {
       pasos.add(_Paso(Icons.turn_left, 'Gira a la izquierda', 'Gira a la izquierda y avanza $d'));
     }
   }
-  pasos.add(_Paso(Icons.flag_rounded, 'Llegas al ${destino.nombre}', 'Llegaste al ${destino.nombre}'));
+  pasos.add(_Paso(Icons.flag_rounded, 'Llegas a ${destino.nombre.replaceAll('Salón Salón', 'Salón')}', 'Llegaste a ${destino.nombre.replaceAll('Salón Salón', 'Salón')}'));
   return _Ruta(pts, pasos, acumulado, mpp);
 }
 
@@ -414,6 +414,198 @@ double _distanciaM(LatLng a, LatLng b) {
   return math.sqrt(dx * dx + dy * dy);
 }
 
+// ---------------------------------------------------------------------------
+// Distribución de salones dentro de cada edificio
+// ---------------------------------------------------------------------------
+String _nombrePiso(int piso) => switch (piso) {
+      1 => 'Planta baja',
+      2 => 'Planta alta',
+      _ => 'Piso $piso',
+    };
+
+/// "Edificio 1" -> "1", "Edificio e" -> "E". Nombres largos se dejan igual.
+String _etiquetaCorta(String nombre) {
+  final t = nombre.trim().replaceFirst(RegExp(r'^edificio\s+', caseSensitive: false), '');
+  if (t.isEmpty) return nombre;
+  return t.length <= 3 ? t.toUpperCase() : t;
+}
+
+/// Parte un nombre largo en dos renglones parejos: "Objetos Perdidos" -> "Objetos\nPerdidos".
+String _partirEtiqueta(String texto) {
+  final s = texto.trim();
+  if (s.length <= 6 || !s.contains(' ')) return s;
+  final palabras = s.split(RegExp(r'\s+'));
+  var mejor = s;
+  var mejorDif = 1 << 30;
+  for (var i = 1; i < palabras.length; i++) {
+    final a = palabras.sublist(0, i).join(' ');
+    final b = palabras.sublist(i).join(' ');
+    final dif = (a.length - b.length).abs();
+    if (dif < mejorDif) {
+      mejorDif = dif;
+      mejor = '$a\n$b';
+    }
+  }
+  return mejor;
+}
+
+Rect _envolvente(List<Offset> pts) {
+  var minX = double.infinity, minY = double.infinity;
+  var maxX = -double.infinity, maxY = -double.infinity;
+  for (final p in pts) {
+    if (p.dx < minX) minX = p.dx;
+    if (p.dy < minY) minY = p.dy;
+    if (p.dx > maxX) maxX = p.dx;
+    if (p.dy > maxY) maxY = p.dy;
+  }
+  return Rect.fromLTRB(minX, minY, maxX, maxY);
+}
+
+class _CajaSalon {
+  const _CajaSalon(this.salon, this.esquinas, this.centro, this.anchoPx, this.altoPx);
+  final Salon salon;
+
+  /// Contorno de la cajita en px del plano.
+  final List<Offset> esquinas;
+  final Offset centro;
+
+  /// Tamaño en px del plano medido en horizontal y vertical de la pantalla.
+  final double anchoPx;
+  final double altoPx;
+}
+
+class _DistribucionEdificio {
+  const _DistribucionEdificio(this.contornos, this.principal, this.cajas);
+
+  /// Contornos que se dibujan del edificio.
+  final List<List<Offset>> contornos;
+
+  /// El contorno más grande: dentro de él se reparten los salones.
+  final List<Offset> principal;
+  final List<_CajaSalon> cajas;
+}
+
+/// Agrupa los salones por edificio y los acomoda dentro del contorno:
+/// una columna por piso (planta baja a la izquierda, planta alta a la derecha)
+/// y, en cada columna, los salones en el orden en que fueron registrados,
+/// de arriba hacia abajo.
+Map<String, _DistribucionEdificio> _distribuirSalones(List<Salon> salones, bool imagen) {
+  final porEdificio = <String, List<Salon>>{};
+  for (final s in salones) {
+    if (s.edificio.isEmpty) continue;
+    porEdificio.putIfAbsent(s.edificio, () => <Salon>[]).add(s);
+  }
+
+  final out = <String, _DistribucionEdificio>{};
+  porEdificio.forEach((nombre, lista) {
+    final candidatos = <List<Offset>>[];
+    for (final s in lista) {
+      final pts = imagen ? s.esquinasImagen : s.esquinasMapa;
+      if (pts.length >= 3) candidatos.add(pts);
+    }
+    if (candidatos.isEmpty) return;
+
+    var principal = candidatos.first;
+    var mayor = -1.0;
+    for (final pts in candidatos) {
+      final r = _envolvente(pts);
+      final a = r.width * r.height;
+      if (a > mayor) {
+        mayor = a;
+        principal = pts;
+      }
+    }
+
+    // Se dibujan los contornos distintos; los que caen dentro del principal
+    // (rectángulos de salones sueltos) se omiten para no duplicar.
+    final rp = _envolvente(principal).inflate(2);
+    final contornos = <List<Offset>>[principal];
+    for (final pts in candidatos) {
+      if (identical(pts, principal)) continue;
+      final r = _envolvente(pts);
+      final dentro = r.left >= rp.left && r.right <= rp.right && r.top >= rp.top && r.bottom <= rp.bottom;
+      if (dentro) continue;
+      final repetido = contornos.any((c) {
+        final q = _envolvente(c);
+        return (q.left - r.left).abs() < 1 && (q.top - r.top).abs() < 1 &&
+            (q.right - r.right).abs() < 1 && (q.bottom - r.bottom).abs() < 1;
+      });
+      if (!repetido) contornos.add(pts);
+    }
+
+    out[nombre] = _DistribucionEdificio(contornos, principal, _cajasDe(lista, principal));
+  });
+  return out;
+}
+
+List<_CajaSalon> _cajasDe(List<Salon> lista, List<Offset> contorno) {
+  // Eje largo del edificio = su lado más largo.
+  var largoMax = 0.0;
+  var eje = const Offset(0, -1);
+  for (var i = 0; i < contorno.length; i++) {
+    final d = contorno[(i + 1) % contorno.length] - contorno[i];
+    if (d.distance > largoMax) {
+      largoMax = d.distance;
+      eje = d / d.distance;
+    }
+  }
+  // Vertical: apunta hacia arriba. Horizontal: apunta hacia la derecha.
+  if (eje.dy.abs() >= eje.dx.abs()) {
+    if (eje.dy > 0) eje = -eje;
+  } else if (eje.dx < 0) {
+    eje = -eje;
+  }
+  final cruz = Offset(-eje.dy, eje.dx);
+
+  var umin = double.infinity, umax = -double.infinity;
+  var vmin = double.infinity, vmax = -double.infinity;
+  for (final p in contorno) {
+    final u = p.dx * eje.dx + p.dy * eje.dy;
+    final v = p.dx * cruz.dx + p.dy * cruz.dy;
+    if (u < umin) umin = u;
+    if (u > umax) umax = u;
+    if (v < vmin) vmin = v;
+    if (v > vmax) vmax = v;
+  }
+  final largo = umax - umin;
+  final ancho = vmax - vmin;
+  if (largo <= 0 || ancho <= 0) return const <_CajaSalon>[];
+
+  final vertical = eje.dy.abs() >= eje.dx.abs();
+  final pisos = {for (final s in lista) s.piso}.toList()..sort();
+  final colAncho = ancho / pisos.length;
+  final cajas = <_CajaSalon>[];
+
+  for (var k = 0; k < pisos.length; k++) {
+    final delPiso = [for (final s in lista) if (s.piso == pisos[k]) s];
+    final m = delPiso.length;
+    final slot = largo / m;
+    final mitadAncho = colAncho * 0.40;
+    final mitadLargo = math.min(slot * 0.40, mitadAncho * 1.4);
+    final r = math.min(mitadAncho, mitadLargo) * 0.30;
+    final vc = vmin + colAncho * (k + 0.5);
+
+    for (var i = 0; i < m; i++) {
+      final uc = umax - slot * (i + 0.5);
+      final c = eje * uc + cruz * vc;
+      Offset q(double u, double v) => c + eje * u + cruz * v;
+      final a = mitadLargo;
+      final b = mitadAncho;
+      cajas.add(_CajaSalon(
+        delPiso[i],
+        [
+          q(-a + r, -b), q(a - r, -b), q(a, -b + r), q(a, b - r),
+          q(a - r, b), q(-a + r, b), q(-a, b - r), q(-a, -b + r),
+        ],
+        c,
+        vertical ? mitadAncho * 2 : mitadLargo * 2,
+        vertical ? mitadLargo * 2 : mitadAncho * 2,
+      ));
+    }
+  }
+  return cajas;
+}
+
 class _OpcionTema {
   const _OpcionTema(this.modo, this.icono, this.titulo, this.subtitulo);
   final ThemeMode modo;
@@ -435,7 +627,6 @@ class _Estado {
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key, this.admin = false});
 
-  /// true = Orienta-Tec-Administrador (dibujar salones y rutas).
   final bool admin;
 
   @override
@@ -446,15 +637,10 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
   static const String _claveHistorial = 'historial_busquedas';
   static const int _maxHistorial = 8;
 
-  // Mapa oscuro sin clave: invierte los tiles de OpenStreetMap conservando el
-  // color (invertir + girar el tono 180°) y los lleva a azul marino.
-  //   fondo ~ #1C2434, parques ~ verde oscuro, agua ~ azul, edificios ~ gris azulado
-  // Para más azul sube el último número de la fila B; para parques más
-  // verdes, baja el segundo valor de la fila R (-1.287) hacia -1.4.
   static const ColorFilter _filtroMapaOscuro = ColorFilter.matrix(<double>[
-    0.5166, -1.287, -0.1296, 0, 240.85, // R
-    -0.3834, -0.387, -0.1296, 0, 251.55, // G
-    -0.3834, -1.287, 0.7704, 0, 272.95, // B
+    0.5166, -1.287, -0.1296, 0, 240.85,
+    -0.3834, -0.387, -0.1296, 0, 251.55,
+    -0.3834, -1.287, 0.7704, 0, 272.95,
     0, 0, 0, 1, 0,
   ]);
 
@@ -463,8 +649,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     LatLng(_centroCampus.latitude + 0.006, _centroCampus.longitude + 0.008),
   );
 
-  // Salones y rutas vigentes. En la app de usuarios se actualizan solos
-  // cuando el administrador publica; en la de administrador son el borrador.
   late DatosMapa _datos = repositorioMapa.value;
   late _Red _red = _Red(_datos.caminos);
   final EditorMapa _editor = EditorMapa(repositorioMapa.value);
@@ -483,9 +667,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
   double _z1 = 17.5;
   bool _mapaListo = false;
   double _zoom = 17.5;
-  bool _etiquetasVisibles = false;
+  bool _etiquetasVisibles = true;
 
-  // Rotación del mapa (grados) para mostrar u ocultar la brújula.
   final ValueNotifier<double> _rotacion = ValueNotifier<double>(0);
   late final AnimationController _rotCtrl = AnimationController(
     vsync: this,
@@ -493,11 +676,9 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
   )..addListener(_tickRotacion);
   double _rot0 = 0;
 
-  // Números de salón buscados por el usuario (el más reciente primero).
   List<String> _historial = <String>[];
 
   bool _verImagen = false;
-  int? _piso;
   EdgeInsets _seguro = EdgeInsets.zero;
   final ValueNotifier<double> _extHoja = ValueNotifier<double>(0);
 
@@ -520,6 +701,44 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
   bool _simulando = false;
   DateTime _ultimoRecalculo = DateTime.fromMillisecondsSinceEpoch(0);
 
+  String? _edificioSeleccionado;
+
+  // Planta elegida en los chips (null = todas) y zoom aproximado (en medios
+  // niveles) para dibujar las cajitas de los salones.
+  int? _piso;
+  bool _cajasVisibles = false;
+  int _pasoZoom = 35;
+
+  Map<String, _DistribucionEdificio>? _distCache;
+  Object? _distDatos;
+  int _distTotal = -1;
+  bool _distImagen = false;
+
+  Map<String, _DistribucionEdificio> get _distribucion {
+    if (_distCache == null ||
+        !identical(_distDatos, _datos) ||
+        _distTotal != _salones.length ||
+        _distImagen != _verImagen) {
+      _distCache = _distribuirSalones(_salones, _verImagen);
+      _distDatos = _datos;
+      _distTotal = _salones.length;
+      _distImagen = _verImagen;
+    }
+    return _distCache!;
+  }
+
+  List<int> get _pisosDisponibles => ({for (final s in _salones) s.piso}.toList()..sort());
+
+  Offset _centroCaja(Salon s) {
+    final d = _distribucion[s.edificio];
+    if (d != null) {
+      for (final c in d.cajas) {
+        if (c.salon == s) return c.centro;
+      }
+    }
+    return _verImagen ? s.centro : s.centroMapa;
+  }
+
   double get _mpp => _geo?.metrosPorPixel ?? _metrosPorPixel;
 
   Offset get _origen {
@@ -533,8 +752,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
   Offset get _origenRuta => (_cerca && _posPx != null) ? _posPx! : _origen;
   bool get _mostrarHoja => _salon != null && _ruta != null && !_navegando;
 
-
-@override
+  @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
@@ -549,7 +767,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
         );
       }
 
-      // Verificación de actualización para la versión de usuario
       WidgetsBinding.instance.addPostFrameCallback((_) {
         ServicioActualizacion.verificarActualizacion(context);
       });
@@ -558,17 +775,11 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     _cargarHistorial();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!widget.admin) _iniciarUbicacion();
-      // Carga la imagen del modo satélite con calma, para que no se trabe
-      // la primera vez que se activa.
       Future.delayed(const Duration(seconds: 2), () {
         if (mounted) precacheImage(const AssetImage(_rutaImagen), context);
       });
     });
   }
-
-
-    
-
 
   void _alCambiarEditor() {
     if (!mounted) return;
@@ -578,8 +789,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     });
   }
 
-  /// El administrador publicó cambios: se redibuja el mapa y, si el usuario
-  /// tenía una ruta abierta, se recalcula con los datos nuevos.
   void _alCambiarRepositorio() {
     if (!mounted) return;
     final nuevos = repositorioMapa.value;
@@ -610,9 +819,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
 
   bool _esActivo(Salon s) => widget.admin ? s.numero == _editor.salonSel : s == _salon;
 
-  List<int> get _pisosDisponibles => (_salones.map((s) => s.piso).toSet().toList()..sort());
-
-  /// Equivalente en px del plano a ~16 px de pantalla con el zoom actual.
   double _radioToque() {
     final metrosPorPxPantalla = 156543.03392 * math.cos(_centroCampus.latitude * math.pi / 180) / math.pow(2, _zoom);
     return 16 * metrosPorPxPantalla / _mpp;
@@ -661,7 +867,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     _mapa.rotate(_rot0 * (1 - t));
   }
 
-  /// Devuelve el mapa a la orientación norte, girando por el lado más corto.
   void _norte() {
     if (!_mapaListo) return;
     var r = _mapa.camera.rotation % 360;
@@ -680,18 +885,14 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
       final guardado = prefs.getStringList(_claveHistorial) ?? const <String>[];
       if (!mounted) return;
       setState(() => _historial = List<String>.of(guardado));
-    } catch (_) {
-      // Sin historial guardado se muestran las sugerencias normales.
-    }
+    } catch (_) {}
   }
 
   Future<void> _guardarHistorial(List<String> lista) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setStringList(_claveHistorial, lista);
-    } catch (_) {
-      // Si no se puede guardar, igual funciona durante esta sesión.
-    }
+    } catch (_) {}
   }
 
   void _registrarBusqueda(Salon s) {
@@ -701,22 +902,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     }
     setState(() => _historial = lista);
     _guardarHistorial(lista);
-  }
-
-  void _borrarHistorial() {
-    setState(() => _historial = <String>[]);
-    _guardarHistorial(const <String>[]);
-  }
-
-  /// Los salones que el usuario buscó, del más reciente al más antiguo.
-  List<Salon> get _recomendados {
-    final out = <Salon>[];
-    for (final n in _historial) {
-      final i = _salones.indexWhere((s) => s.numero == n);
-      if (i >= 0) out.add(_salones[i]);
-      if (out.length == 4) break;
-    }
-    return out;
   }
 
   IconData _iconoTema(ThemeMode modo) => switch (modo) {
@@ -873,8 +1058,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
       _gpsSub?.cancel();
       _gpsSub = Geolocator.getPositionStream(
         locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.best,
-          distanceFilter: 3,
+          accuracy: LocationAccuracy.bestForNavigation,
+          distanceFilter: 1,
         ),
       ).listen(_alRecibirGps, onError: (Object _) {});
     } catch (_) {
@@ -931,7 +1116,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     final pts = _red.ruta(_origenRuta, s.area);
     if (pts == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('No hay una ruta disponible al ${s.nombre}.')),
+        SnackBar(content: Text('No hay una ruta disponible al ${s.nombre.replaceAll('Salón Salón', 'Salón')}.')),
       );
       return;
     }
@@ -961,6 +1146,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
       _avancePx = 0;
       _posUsuario = null;
       _aviso = null;
+      _edificioSeleccionado = null;
     });
     _busqueda.clear();
     WidgetsBinding.instance.addPostFrameCallback((_) => _verCampus());
@@ -972,7 +1158,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     final pts = _red.ruta(_origenRuta, s.area);
     if (pts == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('No hay una ruta disponible al ${s.nombre}.')),
+        SnackBar(content: Text('No hay una ruta disponible al ${s.nombre.replaceAll('Salón Salón', 'Salón')}.')),
       );
       return;
     }
@@ -1095,26 +1281,47 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     });
   }
 
-  bool _visiblePorPiso(Salon s) => _piso == null || s.piso == _piso || s == _salon;
+  List<Salon> _obtenerSalonesPorEdificio(String edificio) {
+    return _salones.where((s) => s.edificio == edificio).toList();
+  }
 
   List<Polygon> _poligonos(_GeoRef geo) {
     final p = Paleta.of(context);
     final out = <Polygon>[];
-    for (final s in _salones) {
-      if (!_visiblePorPiso(s)) continue;
-      final activo = _esActivo(s);
-      final sat = _verImagen;
-      final esquinas = sat ? s.esquinasImagen : s.esquinasMapa;
-      if (esquinas.length < 3) continue;
-      out.add(Polygon(
-        points: esquinas.map(geo.aLatLng).toList(),
-        color: activo
-            ? _cian.withValues(alpha: 0.45)
-            : (sat ? Colors.white.withValues(alpha: 0.14) : p.mapa.withValues(alpha: p.oscuro ? 0.28 : 0.20)),
-        borderColor: activo ? (p.oscuro ? _cian : _cianOscuro) : (sat ? Colors.white : p.mapa),
-        borderStrokeWidth: activo ? 4 : 2,
-      ));
-    }
+    final sat = _verImagen;
+
+    _distribucion.forEach((nombre, d) {
+      final elegido = nombre == _edificioSeleccionado || _salon?.edificio == nombre;
+
+      // Edificio: azul claro con borde azul marino cuando se ven las cajitas.
+      final Color relleno = _cajasVisibles
+          ? const Color(0xFF8FB0F5).withValues(alpha: sat ? 0.60 : 0.80)
+          : (sat ? Colors.white.withValues(alpha: 0.14) : p.mapa.withValues(alpha: p.oscuro ? 0.28 : 0.20));
+      final Color borde = elegido
+          ? (p.oscuro ? _cian : _cianOscuro)
+          : (_cajasVisibles ? _casing : (sat ? Colors.white : p.mapa));
+      for (final contorno in d.contornos) {
+        out.add(Polygon(
+          points: contorno.map(geo.aLatLng).toList(),
+          color: relleno,
+          borderColor: borde,
+          borderStrokeWidth: elegido ? 3 : 1.5,
+        ));
+      }
+
+      if (!_cajasVisibles) return;
+      for (final c in d.cajas) {
+        if (_piso != null && c.salon.piso != _piso) continue;
+        final activo = _esActivo(c.salon);
+        if (_ruta != null && !activo) continue;
+        out.add(Polygon(
+          points: c.esquinas.map(geo.aLatLng).toList(),
+          color: activo ? _rosa.withValues(alpha: 0.92) : const Color(0xFFB9CCFA).withValues(alpha: 0.92),
+          borderColor: activo ? Colors.white : _casing,
+          borderStrokeWidth: activo ? 3 : 1.6,
+        ));
+      }
+    });
     return out;
   }
 
@@ -1160,39 +1367,70 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     return out;
   }
 
+  // Renderiza los salones como cuadros/rectángulos individuales sobre cada edificio
   List<Marker> _marcadores() {
     final geo = _geo;
     final out = <Marker>[];
 
     if (geo != null) {
-      for (final s in _salones) {
-        if (!_visiblePorPiso(s)) continue;
-        final activo = _esActivo(s);
-        final pos = geo.aLatLng(_verImagen ? s.centro : s.centroMapa);
-        if (activo && _ruta != null) {
+      final dist = _distribucion;
+
+      // Con el mapa alejado: una etiqueta corta por edificio ("1", "E").
+      if (_etiquetasVisibles && !_cajasVisibles && _ruta == null) {
+        dist.forEach((nombre, d) {
+          if (_edificioSeleccionado == nombre) return;
+          final c = _envolvente(d.principal).center;
           out.add(Marker(
-            point: pos,
-            width: 46,
-            height: 46,
-            alignment: Alignment.topCenter,
-            child: const Icon(Icons.location_on, size: 46, color: _rosa, shadows: [Shadow(color: Colors.black45, blurRadius: 6)]),
+            point: geo.aLatLng(c),
+            width: 80,
+            height: 30,
+            child: Center(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => setState(() => _edificioSeleccionado = nombre),
+                child: _EtiquetaEdificio(nombre: _etiquetaCorta(nombre), activa: false),
+              ),
+            ),
           ));
-          continue;
-        }
-        // Con el mapa alejado no se dibuja nada sobre los salones (solo su
-        // contorno); las etiquetas aparecen al acercar.
-        if (!_etiquetasVisibles && !activo) continue;
+        });
+      }
+
+      // Con zoom cerca: el número de cada salón sobre su cajita.
+      if (_cajasVisibles) {
+        final metrosPorPxPantalla =
+            156543.03392 * math.cos(_centroCampus.latitude * math.pi / 180) / math.pow(2, _pasoZoom / 2.0);
+        final k = _mpp / metrosPorPxPantalla;
+        dist.forEach((nombre, d) {
+          for (final c in d.cajas) {
+            if (_piso != null && c.salon.piso != _piso) continue;
+            final activo = _esActivo(c.salon);
+            if (_ruta != null && !activo) continue;
+            final w = c.anchoPx * k * 0.92;
+            final h = c.altoPx * k * 0.92;
+            if (w < 20 || h < 14) continue;
+            out.add(Marker(
+              point: geo.aLatLng(c.centro),
+              width: w,
+              height: h,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => _seleccionar(c.salon),
+                child: _TextoCaja(texto: c.salon.numero, activo: activo),
+              ),
+            ));
+          }
+        });
+      }
+
+      final sSel = _salon;
+      if (sSel != null && _ruta != null) {
+        final pos = geo.aLatLng(_centroCaja(sSel));
         out.add(Marker(
           point: pos,
-          width: 64,
-          height: 30,
-          child: Center(
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: () => _seleccionar(s),
-              child: _EtiquetaSalon(numero: s.numero, activa: activo),
-            ),
-          ),
+          width: 46,
+          height: 46,
+          alignment: Alignment.topCenter,
+          child: const Icon(Icons.location_on, size: 46, color: _rosa, shadows: [Shadow(color: Colors.black45, blurRadius: 6)]),
         ));
       }
 
@@ -1233,66 +1471,83 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
             Positioned.fill(
               child: RepaintBoundary(
                 child: FlutterMap(
-                mapController: _mapa,
-                options: MapOptions(
-                  initialCenter: _centroCampus,
-                  initialZoom: 17.5,
-                  minZoom: 15,
-                  maxZoom: 21,
-                  cameraConstraint: CameraConstraint.containCenter(bounds: _limitesCamara),
-                  interactionOptions: const InteractionOptions(flags: InteractiveFlag.all),
-                  onMapReady: () {
-                    _mapaListo = true;
-                    WidgetsBinding.instance.addPostFrameCallback((_) {
-                      _verCampus();
-                    });
-                  },
-                  onTap: (_, punto) {
-                    final g = _geo;
-                    if (g == null) return;
-                    final plano = g.aPlano(punto.latitude, punto.longitude);
-                    if (widget.admin) {
-                      _tocarEditor(plano);
-                      return;
-                    }
-                    final s = _salonEn(plano);
-                    if (s != null) _seleccionar(s);
-                  },
-                  onPositionChanged: (camara, hayGesto) {
-                    _zoom = camara.zoom;
-                    if ((camara.rotation - _rotacion.value).abs() > 0.1) {
-                      _rotacion.value = camara.rotation;
-                    }
-                    if (hayGesto && _rotCtrl.isAnimating) _rotCtrl.stop();
-                    if (hayGesto && _navegando && _siguiendo) {
-                      setState(() => _siguiendo = false);
-                    }
-                    final visibles = camara.zoom >= _zoomEtiquetas;
-                    if (visibles != _etiquetasVisibles) {
-                      setState(() => _etiquetasVisibles = visibles);
-                    }
-                  },
+                  mapController: _mapa,
+                  options: MapOptions(
+                    initialCenter: _centroCampus,
+                    initialZoom: 17.5,
+                    minZoom: 15,
+                    maxZoom: 21,
+                    cameraConstraint: CameraConstraint.containCenter(bounds: _limitesCamara),
+                    interactionOptions: const InteractionOptions(flags: InteractiveFlag.all),
+                    onMapReady: () {
+                      _mapaListo = true;
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        _verCampus();
+                      });
+                    },
+                    onTap: (_, punto) {
+                      final g = _geo;
+                      if (g == null) return;
+                      final plano = g.aPlano(punto.latitude, punto.longitude);
+                      if (widget.admin) {
+                        _tocarEditor(plano);
+                        return;
+                      }
+                      
+                      final s = _salonEn(plano);
+                      if (s != null) {
+                        setState(() {
+                          _edificioSeleccionado = s.edificio;
+                        });
+                      } else {
+                        setState(() {
+                          _edificioSeleccionado = null;
+                        });
+                      }
+                    },
+                    onPositionChanged: (camara, hayGesto) {
+                      _zoom = camara.zoom;
+                      if ((camara.rotation - _rotacion.value).abs() > 0.1) {
+                        _rotacion.value = camara.rotation;
+                      }
+                      if (hayGesto && _rotCtrl.isAnimating) _rotCtrl.stop();
+                      if (hayGesto && _navegando && _siguiendo) {
+                        setState(() => _siguiendo = false);
+                      }
+                      final visibles = camara.zoom >= _zoomEtiquetas;
+                      final cajas = camara.zoom >= _zoomSalones;
+                      final paso = (camara.zoom * 2).floor();
+                      if (visibles != _etiquetasVisibles ||
+                          cajas != _cajasVisibles ||
+                          (cajas && paso != _pasoZoom)) {
+                        setState(() {
+                          _etiquetasVisibles = visibles;
+                          _cajasVisibles = cajas;
+                          _pasoZoom = paso;
+                        });
+                      }
+                    },
+                  ),
+                  children: [
+                    _capaTiles(p),
+                    if (geo != null && _verImagen)
+                      OverlayImageLayer(
+                        overlayImages: [
+                          RotatedOverlayImage(
+                            imageProvider: const AssetImage(_rutaImagen),
+                            topLeftCorner: geo.aLatLng(const Offset(0, 0)),
+                            bottomLeftCorner: geo.aLatLng(const Offset(0, _imgH)),
+                            bottomRightCorner: geo.aLatLng(const Offset(_imgW, _imgH)),
+                            opacity: 0.96,
+                          ),
+                        ],
+                      ),
+                    if (geo != null) PolygonLayer(polygons: _poligonos(geo)),
+                    if (geo != null && _ruta != null) PolylineLayer(polylines: _lineas(geo)),
+                    MarkerLayer(rotate: true, markers: _marcadores()),
+                    if (widget.admin && geo != null) ..._editor.capas(aLatLng: geo.aLatLng, imagen: _verImagen),
+                  ],
                 ),
-                children: [
-                  _capaTiles(p),
-                  if (geo != null && _verImagen)
-                    OverlayImageLayer(
-                      overlayImages: [
-                        RotatedOverlayImage(
-                          imageProvider: const AssetImage(_rutaImagen),
-                          topLeftCorner: geo.aLatLng(const Offset(0, 0)),
-                          bottomLeftCorner: geo.aLatLng(const Offset(0, _imgH)),
-                          bottomRightCorner: geo.aLatLng(const Offset(_imgW, _imgH)),
-                          opacity: 0.96,
-                        ),
-                      ],
-                    ),
-                  if (geo != null) PolygonLayer(polygons: _poligonos(geo)),
-                  if (geo != null && _ruta != null) PolylineLayer(polylines: _lineas(geo)),
-                  MarkerLayer(rotate: true, markers: _marcadores()),
-                  if (widget.admin && geo != null) ..._editor.capas(aLatLng: geo.aLatLng, imagen: _verImagen),
-                ],
-              ),
               ),
             ),
             _capaSuperior(),
@@ -1441,7 +1696,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
           final minF = (270 / h).clamp(0.22, 0.5).toDouble();
           return Stack(
             children: [
-              // Solo esta parte se redibuja mientras arrastras la hoja.
               Positioned.fill(
                 child: ValueListenableBuilder<double>(
                   valueListenable: _extHoja,
@@ -1524,6 +1778,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
 
   List<Widget> _contenidoHoja(Salon s, _Ruta r) {
     final p = Paleta.of(context);
+    final nombreLimpio = s.nombre.replaceAll('Salón Salón', 'Salón');
     return [
       Center(
         child: Container(
@@ -1554,7 +1809,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  s.nombre,
+                  nombreLimpio,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: p.acento),
@@ -1606,7 +1861,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
       const SizedBox(height: 10),
       _FilaDetalle(icono: Icons.meeting_room_outlined, etiqueta: 'Tipo', valor: s.tipo),
       _FilaDetalle(icono: Icons.apartment_outlined, etiqueta: 'Edificio', valor: s.edificio),
-      _FilaDetalle(icono: Icons.layers_outlined, etiqueta: 'Piso', valor: '${s.piso}'),
+      _FilaDetalle(icono: Icons.layers_outlined, etiqueta: 'Nivel', valor: _nombrePiso(s.piso)),
       const SizedBox(height: 6),
       Text(s.detalle, style: TextStyle(fontSize: 14, color: p.textoSec, height: 1.4)),
       const SizedBox(height: 22),
@@ -1644,7 +1899,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
         var lista = _salones.where((s) {
           return q.isEmpty || s.numero.contains(q) || s.nombre.toLowerCase().contains(q) || s.edificio.toLowerCase().contains(q);
         }).toList();
-        // Sin texto escrito, primero van los salones que ya buscó.
         if (q.isEmpty && _historial.isNotEmpty) {
           final recientes = <Salon>[
             for (final n in _historial) ...lista.where((s) => s.numero == n),
@@ -1669,7 +1923,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
               decoration: BoxDecoration(color: p.primario, borderRadius: BorderRadius.circular(12)),
               child: Text(s.numero, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
             ),
-            title: Text(s.nombre),
+            title: Text(s.nombre.replaceAll('Salón Salón', 'Salón')),
             subtitle: Text(s.ubicacion),
             trailing: (q.isEmpty && _historial.contains(s.numero))
                 ? Icon(Icons.history, size: 20, color: p.textoSec)
@@ -1693,17 +1947,26 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
         clipBehavior: Clip.none,
         children: [
           if (widget.admin) ...[
-            _ChipMapa(icono: Icons.admin_panel_settings, texto: 'Administrador', activo: true, onTap: () {}),
+            _ChipMapa(
+              icono: Icons.admin_panel_settings,
+              texto: 'Administrador',
+              activo: true,
+              onTap: () {},
+            ),
             const SizedBox(width: 8),
           ],
-          _ChipMapa(icono: Icons.zoom_out_map, texto: 'Ver campus', onTap: _verCampus),
-          for (final p in _pisosDisponibles) ...[
+          _ChipMapa(
+            icono: Icons.zoom_out_map,
+            texto: 'Ver campus',
+            onTap: _verCampus,
+          ),
+          for (final piso in _pisosDisponibles) ...[
             const SizedBox(width: 8),
             _ChipMapa(
               icono: Icons.layers_outlined,
-              texto: 'Piso $p',
-              activo: _piso == p,
-              onTap: () => setState(() => _piso = _piso == p ? null : p),
+              texto: _nombrePiso(piso),
+              activo: _piso == piso,
+              onTap: () => setState(() => _piso = _piso == piso ? null : piso),
             ),
           ],
         ],
@@ -1761,7 +2024,11 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     final p = Paleta.of(context);
     final Widget hijo;
     if (_salon == null || _ruta == null) {
-      hijo = _panelInicio();
+      if (_edificioSeleccionado != null) {
+        hijo = _panelSalonesDeEdificio(_edificioSeleccionado!);
+      } else {
+        hijo = _panelInicioEstandar();
+      }
     } else if (_llegada) {
       hijo = _panelLlegada();
     } else {
@@ -1804,13 +2071,12 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     return _Estado(Icons.place_outlined, 'Estás fuera del campus: rutas desde el acceso principal', p.textoSec);
   }
 
-  Widget _panelInicio() {
+  Widget _panelInicioEstandar() {
     final p = Paleta.of(context);
     final e = _estadoUbicacion();
-    final recientes = _recomendados;
-    final lista = recientes.isEmpty ? _salones.take(4).toList() : recientes;
+
     return Column(
-      key: const ValueKey('inicio'),
+      key: const ValueKey('inicio_estandar'),
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
@@ -1844,7 +2110,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text('TecNM Campus Orizaba', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: p.acento)),
-                  Text('Salones y edificios', style: TextStyle(fontSize: 14, color: p.textoSec)),
+                  Text('Toca un salón o edificio en el mapa', style: TextStyle(fontSize: 14, color: p.textoSec)),
                 ],
               ),
             ),
@@ -1858,43 +2124,97 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
             Expanded(child: Text(e.texto, style: TextStyle(fontSize: 13, color: e.color))),
           ],
         ),
-        const SizedBox(height: 10),
+      ],
+    );
+  }
+
+  Widget _panelSalonesDeEdificio(String edificio) {
+    final p = Paleta.of(context);
+    final salonesEdif = _obtenerSalonesPorEdificio(edificio);
+
+    return Column(
+      key: ValueKey('salones_$edificio'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
         Row(
           children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: p.primario.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(Icons.apartment_rounded, color: p.acento),
+            ),
+            const SizedBox(width: 12),
             Expanded(
-              child: Text(
-                recientes.isEmpty ? 'Sugerencias' : 'Tus búsquedas recientes',
-                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: p.textoSec),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    edificio,
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: p.acento),
+                  ),
+                  Text(
+                    '${salonesEdif.length} salones disponibles',
+                    style: TextStyle(fontSize: 12, color: p.textoSec),
+                  ),
+                ],
               ),
             ),
-            if (recientes.isNotEmpty)
-              TextButton(
-                onPressed: _borrarHistorial,
-                style: TextButton.styleFrom(
-                  foregroundColor: p.acento,
-                  visualDensity: VisualDensity.compact,
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  minimumSize: const Size(0, 32),
-                ),
-                child: const Text('Borrar'),
-              ),
+            IconButton(
+              icon: Icon(Icons.close, color: p.textoSec),
+              onPressed: () {
+                setState(() {
+                  _edificioSeleccionado = null;
+                });
+              },
+            ),
           ],
         ),
-        const SizedBox(height: 4),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            for (final s in lista)
-              ActionChip(
-                avatar: recientes.isEmpty ? null : Icon(Icons.history, size: 18, color: p.textoSec),
-                label: Text(s.nombre),
-                backgroundColor: p.chip,
-                side: BorderSide.none,
-                labelStyle: TextStyle(color: p.acento, fontWeight: FontWeight.w600),
-                onPressed: () => _seleccionar(s),
-              ),
-          ],
+        const SizedBox(height: 12),
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 220),
+          child: ListView.separated(
+            shrinkWrap: true,
+            itemCount: salonesEdif.length,
+            separatorBuilder: (_, __) => const SizedBox(height: 6),
+            itemBuilder: (context, index) {
+              final s = salonesEdif[index];
+
+              return Material(
+                color: p.chip,
+                borderRadius: BorderRadius.circular(12),
+                child: ListTile(
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+                  leading: Container(
+                    width: 38,
+                    height: 38,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: p.primario,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      s.numero,
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
+                    ),
+                  ),
+                  title: Text(
+                    s.nombre.replaceAll('Salón Salón', 'Salón'),
+                    style: TextStyle(fontWeight: FontWeight.bold, color: p.acento, fontSize: 14),
+                  ),
+                  subtitle: Text(
+                    _nombrePiso(s.piso),
+                    style: TextStyle(fontSize: 12, color: p.textoSec),
+                  ),
+                  trailing: Icon(Icons.navigation_outlined, color: p.acento, size: 20),
+                  onTap: () => _seleccionar(s),
+                ),
+              );
+            },
+          ),
         ),
       ],
     );
@@ -1916,7 +2236,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
             Text('$minutos min', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700, color: p.verde)),
             Text('  (${restanteM.round()} m)', style: TextStyle(fontSize: 15, color: p.textoSec)),
             const Spacer(),
-            Text(_salon?.nombre ?? '', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: p.acento)),
+            Text(_salon?.nombre.replaceAll('Salón Salón', 'Salón') ?? '', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: p.acento)),
           ],
         ),
         if (_aviso != null) ...[
@@ -1972,7 +2292,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Llegaste al ${s.nombre}', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: p.acento)),
+                  Text('Llegaste a ${s.nombre.replaceAll('Salón Salón', 'Salón')}', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: p.acento)),
                   Text(s.ubicacion, style: TextStyle(fontSize: 13, color: p.textoSec)),
                 ],
               ),
@@ -2020,38 +2340,398 @@ class _TituloSeccion extends StatelessWidget {
   }
 }
 
-class _FotoSalon extends StatelessWidget {
+class _TextoCaja extends StatelessWidget {
+  const _TextoCaja({required this.texto, required this.activo});
+  final String texto;
+  final bool activo;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: FittedBox(
+        fit: BoxFit.scaleDown,
+        child: Padding(
+          padding: const EdgeInsets.all(2),
+          child: Text(
+            _partirEtiqueta(texto),
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 13,
+              height: 1.05,
+              fontWeight: FontWeight.w600,
+              color: activo ? Colors.white : const Color(0xFF0B1B3A),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _EtiquetaEdificio extends StatelessWidget {
+  const _EtiquetaEdificio({required this.nombre, required this.activa});
+  final String nombre;
+  final bool activa;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = Paleta.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: activa ? p.primario : p.superficie.withValues(alpha: 0.95),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: activa ? Colors.white : p.acento.withValues(alpha: 0.3),
+          width: 1,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.25),
+            blurRadius: 4,
+            offset: const Offset(0, 1),
+          )
+        ],
+      ),
+      child: Text(
+        nombre,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.bold,
+          color: activa ? Colors.white : p.acento,
+        ),
+      ),
+    );
+  }
+}
+
+// Representa cada salón como un cuadro/rectángulo interactivo en el mapa
+class _CuadroSalonMap extends StatelessWidget {
+  const _CuadroSalonMap({
+    required this.numero,
+    required this.piso,
+    required this.activo,
+  });
+
+  final String numero;
+  final int piso;
+  final bool activo;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = Paleta.of(context);
+    final colorFondo = activo
+        ? _rosa
+        : (piso > 1
+            ? const Color(0xFF00B0FF)
+            : p.primario);
+
+    return Container(
+      width: 32,
+      height: 32,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: colorFondo,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(
+          color: Colors.white,
+          width: activo ? 2 : 1,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.3),
+            blurRadius: 3,
+            offset: const Offset(0, 1),
+          )
+        ],
+      ),
+      child: FittedBox(
+        fit: BoxFit.scaleDown,
+        child: Padding(
+          padding: const EdgeInsets.all(2.0),
+          child: Text(
+            numero,
+            style: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
+              color: Colors.white,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Componente de Foto del Salón
+// ---------------------------------------------------------------------------
+class _FotoSalon extends StatefulWidget {
   const _FotoSalon({required this.salon});
   final Salon salon;
 
   @override
+  State<_FotoSalon> createState() => _FotoSalonState();
+}
+
+class _FotoSalonState extends State<_FotoSalon> {
+  bool _subiendo = false;
+  late String _fotoActual;
+
+  @override
+  void initState() {
+    super.initState();
+    _fotoActual = widget.salon.foto;
+  }
+
+  @override
+  void didUpdateWidget(covariant _FotoSalon oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.salon.numero != widget.salon.numero ||
+        oldWidget.salon.foto != widget.salon.foto) {
+      _fotoActual = widget.salon.foto;
+    }
+  }
+
+  Future<void> _capturarYSubirFoto() async {
+    final picker = ImagePicker();
+    final XFile? imagen = await picker.pickImage(
+      source: ImageSource.camera,
+      imageQuality: 50,
+    );
+
+    if (imagen == null) return;
+
+    setState(() => _subiendo = true);
+
+    try {
+      final bytes = await imagen.readAsBytes();
+      final base64Image = base64Encode(bytes);
+      final dataUrl = "data:image/jpeg;base64,$base64Image";
+
+      final urlGet = Uri.parse(
+        "https://orienta-tec-administrador-default-rtdb.firebaseio.com/mapa/salones.json?auth=lgkRfa27my9DXMXylPgcalgRXNP4X92rgarwkT6r"
+      );
+      final response = await http.get(urlGet);
+
+      if (response.statusCode == 200) {
+        final decodedData = jsonDecode(response.body);
+        String? keyEncontrada;
+
+        if (decodedData is Map) {
+          decodedData.forEach((key, value) {
+            if (value != null && value['numero'].toString() == widget.salon.numero.toString()) {
+              keyEncontrada = key.toString();
+            }
+          });
+        } else if (decodedData is List) {
+          final index = decodedData.indexWhere(
+            (element) => element != null && element['numero'].toString() == widget.salon.numero.toString()
+          );
+          if (index != -1) keyEncontrada = index.toString();
+        }
+
+        if (keyEncontrada != null) {
+          final urlPut = Uri.parse(
+            "https://orienta-tec-administrador-default-rtdb.firebaseio.com/mapa/salones/$keyEncontrada/foto.json?auth=lgkRfa27my9DXMXylPgcalgRXNP4X92rgarwkT6r"
+          );
+          await http.put(urlPut, body: jsonEncode(dataUrl));
+
+          setState(() {
+            _fotoActual = dataUrl;
+          });
+
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('¡Foto actualizada con éxito!')),
+            );
+          }
+        } else {
+          throw Exception("No se encontró el salón en la base de datos.");
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error al guardar la foto: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _subiendo = false);
+    }
+  }
+
+  Future<void> _borrarFoto() async {
+    final confirmar = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('¿Eliminar foto?'),
+        content: const Text('Esta acción quitará la foto del salón para todos los usuarios.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancelar'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Eliminar', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmar != true) return;
+
+    setState(() => _subiendo = true);
+
+    try {
+      final urlGet = Uri.parse(
+        "https://orienta-tec-administrador-default-rtdb.firebaseio.com/mapa/salones.json?auth=lgkRfa27my9DXMXylPgcalgRXNP4X92rgarwkT6r"
+      );
+      final response = await http.get(urlGet);
+
+      if (response.statusCode == 200) {
+        final decodedData = jsonDecode(response.body);
+        String? keyEncontrada;
+
+        if (decodedData is Map) {
+          decodedData.forEach((key, value) {
+            if (value != null && value['numero'].toString() == widget.salon.numero.toString()) {
+              keyEncontrada = key.toString();
+            }
+          });
+        } else if (decodedData is List) {
+          final index = decodedData.indexWhere(
+            (element) => element != null && element['numero'].toString() == widget.salon.numero.toString()
+          );
+          if (index != -1) keyEncontrada = index.toString();
+        }
+
+        if (keyEncontrada != null) {
+          final urlDelete = Uri.parse(
+            "https://orienta-tec-administrador-default-rtdb.firebaseio.com/mapa/salones/$keyEncontrada/foto.json?auth=lgkRfa27my9DXMXylPgcalgRXNP4X92rgarwkT6r"
+          );
+          await http.delete(urlDelete);
+
+          setState(() {
+            _fotoActual = "";
+          });
+
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('La foto ha sido eliminada.')),
+            );
+          }
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error al eliminar: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _subiendo = false);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return AspectRatio(
-      aspectRatio: 16 / 9,
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(16),
-        child: Image.asset(
-          salon.foto,
-          cacheWidth: 900,
-          fit: BoxFit.cover,
-          errorBuilder: (context, error, stack) => Container(
-            color: Paleta.of(context).chip,
-            alignment: Alignment.center,
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
+    final p = Paleta.of(context);
+    final tieneFoto = _fotoActual.isNotEmpty;
+
+    return Column(
+      children: [
+        AspectRatio(
+          aspectRatio: 16 / 9,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(16),
+            child: Stack(
+              fit: StackFit.expand,
               children: [
-                Icon(Icons.photo_camera_outlined, size: 34, color: Colors.grey.shade500),
-                const SizedBox(height: 8),
-                Text(
-                  'Foto del ${salon.nombre} próximamente',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
-                ),
+                if (tieneFoto && _fotoActual.startsWith('data:image'))
+                  Image.memory(
+                    base64Decode(_fotoActual.split(',').last),
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => _vistaVacia(p),
+                  )
+                else if (tieneFoto && _fotoActual.startsWith('http'))
+                  Image.network(
+                    _fotoActual,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => _vistaVacia(p),
+                  )
+                else if (tieneFoto)
+                  Image.asset(
+                    _fotoActual,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => _vistaVacia(p),
+                  )
+                else
+                  _vistaVacia(p),
+
+                if (tieneFoto && !_subiendo)
+                  Positioned(
+                    top: 8,
+                    right: 8,
+                    child: CircleAvatar(
+                      backgroundColor: Colors.black54,
+                      child: IconButton(
+                        icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+                        tooltip: 'Eliminar foto',
+                        onPressed: _borrarFoto,
+                      ),
+                    ),
+                  ),
+
+                if (_subiendo)
+                  Container(
+                    color: Colors.black54,
+                    child: const Center(
+                      child: CircularProgressIndicator(color: Colors.white),
+                    ),
+                  ),
               ],
             ),
           ),
         ),
+        const SizedBox(height: 10),
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            onPressed: _subiendo ? null : _capturarYSubirFoto,
+            icon: const Icon(Icons.add_a_photo_outlined, size: 18),
+            label: const Text("Añadir / Cambiar foto del salón"),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: p.acento,
+              side: BorderSide(color: p.acento),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _vistaVacia(Paleta p) {
+    return Container(
+      color: p.chip,
+      alignment: Alignment.center,
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.photo_camera_outlined, size: 34, color: Colors.grey.shade500),
+          const SizedBox(height: 8),
+          Text(
+            'Sin foto disponible',
+            style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
+          ),
+        ],
       ),
     );
   }
@@ -2164,29 +2844,6 @@ class _ChipMapa extends StatelessWidget {
   }
 }
 
-class _EtiquetaSalon extends StatelessWidget {
-  const _EtiquetaSalon({required this.numero, required this.activa});
-  final String numero;
-  final bool activa;
-
-  @override
-  Widget build(BuildContext context) {
-    final p = Paleta.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: activa ? p.primario : p.superficie.withValues(alpha: 0.95),
-        borderRadius: BorderRadius.circular(9),
-        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.25), blurRadius: 4, offset: const Offset(0, 1))],
-      ),
-      child: Text(
-        numero,
-        style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: activa ? Colors.white : p.acento),
-      ),
-    );
-  }
-}
-
 class _MarcadorOrigen extends StatelessWidget {
   const _MarcadorOrigen();
 
@@ -2241,7 +2898,6 @@ class _Atribucion extends StatelessWidget {
   }
 }
 
-/// Brújula: aparece solo cuando el mapa está girado y lo regresa al norte.
 class _BotonBrujula extends StatelessWidget {
   const _BotonBrujula({required this.rotacion, required this.onPressed});
   final ValueListenable<double> rotacion;
@@ -2275,4 +2931,3 @@ class _BotonBrujula extends StatelessWidget {
     );
   }
 }
-

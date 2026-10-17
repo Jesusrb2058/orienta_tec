@@ -2,7 +2,7 @@ name: orienta_tec
 description: "A new Flutter project."
 publish_to: 'none'
 
-version: 1.0.0+1
+version: 1.0.2+11
 
 environment:
   sdk: ^3.13.4
@@ -10,7 +10,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-
+  image_picker: ^1.1.2  # <--- Para seleccionar foto de galería o cámara
   cupertino_icons: ^1.0.8
   geolocator: ^14.1.1
   flutter_map: ^8.3.2
@@ -20,6 +20,7 @@ dependencies:
   http: ^1.6.0 # Sincronización del mapa con el servidor
   package_info_plus: ^10.2.2
   ota_update: ^7.1.0
+  firebase_storage: ^12.4.1 # <--- Agregar para almacenar archivos/fotos
 
 
 dev_dependencies:
