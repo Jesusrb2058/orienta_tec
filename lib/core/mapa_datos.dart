@@ -90,15 +90,30 @@ class Salon {
     required this.piso,
     this.tipo = 'Aula',
     this.descripcion = '',
+    this.columna = -1,
+    this.indicaciones = const <String>[],
     this.poligonoImagen = const <Offset>[],
     this.poligonoMapa = const <Offset>[],
   });
 
+  /// Nombre o número del salón ("205", "L03", "Room 1", "Baños").
   final String numero;
+
+  /// Nombre del bloque (edificio) al que pertenece.
   final String edificio;
   final int piso;
   final String tipo;
   final String descripcion;
+
+  /// Columna dentro del bloque (0, 1, 2…). -1 = sin asignar: se reparten por piso.
+  final int columna;
+
+  /// "Cómo llegar" escrito por el administrador, una indicación por elemento.
+  /// Vacío = la app genera las indicaciones sola a partir de la ruta.
+  final List<String> indicaciones;
+
+  /// Identificador único: el mismo nombre puede repetirse en otro bloque.
+  String get clave => '$edificio|$numero';
 
   /// Contorno sobre la imagen del campus (vista satélite), en px del plano.
   final List<Offset> poligonoImagen;
@@ -132,6 +147,8 @@ class Salon {
     int? piso,
     String? tipo,
     String? descripcion,
+    int? columna,
+    List<String>? indicaciones,
     List<Offset>? poligonoImagen,
     List<Offset>? poligonoMapa,
   }) =>
@@ -141,6 +158,8 @@ class Salon {
         piso: piso ?? this.piso,
         tipo: tipo ?? this.tipo,
         descripcion: descripcion ?? this.descripcion,
+        columna: columna ?? this.columna,
+        indicaciones: indicaciones ?? this.indicaciones,
         poligonoImagen: poligonoImagen ?? this.poligonoImagen,
         poligonoMapa: poligonoMapa ?? this.poligonoMapa,
       );
@@ -151,6 +170,8 @@ class Salon {
         'piso': piso,
         'tipo': tipo,
         'descripcion': descripcion,
+        'columna': columna,
+        'indicaciones': indicaciones,
         'imagen': _ptsAJson(poligonoImagen),
         'mapa': _ptsAJson(poligonoMapa),
       };
@@ -161,39 +182,212 @@ class Salon {
         piso: (j['piso'] as num?)?.toInt() ?? 1,
         tipo: '${j['tipo'] ?? 'Aula'}',
         descripcion: '${j['descripcion'] ?? ''}',
+        columna: (j['columna'] as num?)?.toInt() ?? -1,
+        indicaciones: _textos(j['indicaciones']),
         poligonoImagen: _ptsDeJson(j['imagen']),
         poligonoMapa: _ptsDeJson(j['mapa']),
       );
 
-  // Dos salones son el mismo si tienen el mismo número.
+  // Dos salones son el mismo si tienen el mismo bloque y el mismo nombre.
   @override
-  bool operator ==(Object other) => other is Salon && other.numero == numero;
+  bool operator ==(Object other) => other is Salon && other.clave == clave;
 
   @override
-  int get hashCode => numero.hashCode;
+  int get hashCode => clave.hashCode;
+}
+
+// ---------------------------------------------------------------------------
+// Texto y bloques
+// ---------------------------------------------------------------------------
+List<String> _textos(Object? v) {
+  final items = v is Map ? v.values : (v is List ? v : const []);
+  return [
+    for (final e in items)
+      if ('$e'.trim().isNotEmpty) '$e'.trim(),
+  ];
+}
+
+String sinAcentos(String s) {
+  const de = 'áàäâéèëêíìïîóòöôúùüûñ';
+  const a = 'aaaaeeeeiiiioooouuuun';
+  final b = StringBuffer();
+  for (final c in s.toLowerCase().split('')) {
+    final i = de.indexOf(c);
+    b.write(i >= 0 ? a[i] : c);
+  }
+  return b.toString();
+}
+
+/// Convierte "101-106, E01 al E03, Baños" en la lista de salones. Los rangos
+/// pueden llevar letras ("E01-E03", "A61 al 64") y conservan los ceros.
+/// Se separa por comas, punto y coma o renglones; no repite nombres.
+List<String> expandirSalones(String texto) {
+  final out = <String>[];
+  final vistos = <String>{};
+  void agregar(String s) {
+    final t = s.trim();
+    if (t.isNotEmpty && vistos.add(t.toLowerCase())) out.add(t);
+  }
+
+  final rango = RegExp(r'^([A-Za-z]*)(\d+)\s*(?:-|–|—|al|a)\s*([A-Za-z]*)(\d+)$', caseSensitive: false);
+  for (final trozo in texto.split(RegExp(r'[,;\n]+'))) {
+    final t = trozo.trim();
+    if (t.isEmpty) continue;
+    final m = rango.firstMatch(t);
+    if (m != null) {
+      final pre = m.group(1)!;
+      final pre2 = m.group(3)!;
+      if (pre2.isEmpty || pre2.toLowerCase() == pre.toLowerCase()) {
+        final ini = m.group(2)!;
+        var a = int.parse(ini);
+        var b = int.parse(m.group(4)!);
+        if (b < a) {
+          final x = a;
+          a = b;
+          b = x;
+        }
+        if (b - a <= 200) {
+          final ancho = ini.startsWith('0') ? ini.length : 0;
+          for (var i = a; i <= b; i++) {
+            agregar('$pre${i.toString().padLeft(ancho, '0')}');
+          }
+          continue;
+        }
+      }
+    }
+    agregar(t);
+  }
+  return out;
+}
+
+/// Tipo que se propone al crear un salón según su nombre (se puede cambiar).
+String tipoSugerido(String nombre) {
+  final n = sinAcentos(nombre.trim());
+  if (n.startsWith('oficina')) return 'Oficina';
+  if (n.contains('bano')) return 'Baños';
+  if (n.contains('enfermeria')) return 'Enfermería';
+  if (n.contains('consultorio')) return 'Consultorio';
+  if (n.contains('aula magna')) return 'Auditorio';
+  if (n.contains('objetos perdidos')) return 'Servicio';
+  if (n.contains('escalera')) return 'Escaleras';
+  if (n.contains('laboratorio') || RegExp(r'^lab\b').hasMatch(n) || RegExp(r'^l\d').hasMatch(n)) {
+    return 'Laboratorio';
+  }
+  return 'Aula';
+}
+
+/// Salones de un bloque agrupados en columnas, de izquierda a derecha.
+/// Con columnas asignadas se respetan; si no, hay una columna por piso.
+List<List<Salon>> columnasDeBloque(List<Salon> lista) {
+  if (lista.any((s) => s.columna >= 0)) {
+    final claves = {for (final s in lista) s.columna}.toList()
+      ..sort((a, b) => (a < 0 ? 1 << 30 : a).compareTo(b < 0 ? 1 << 30 : b));
+    return [
+      for (final k in claves) [for (final s in lista) if (s.columna == k) s],
+    ];
+  }
+  final pisos = {for (final s in lista) s.piso}.toList()..sort();
+  return [
+    for (final p in pisos) [for (final s in lista) if (s.piso == p) s],
+  ];
+}
+
+/// Contorno del bloque: el más grande entre sus salones. Con [propio] solo
+/// cuenta el que se dibujó en esa vista (sin tomar prestado el de la otra).
+List<Offset> contornoDeBloque(List<Salon> lista, bool imagen, {bool propio = false}) {
+  var mejor = const <Offset>[];
+  var area = -1.0;
+  for (final s in lista) {
+    final pts = propio
+        ? (imagen ? s.poligonoImagen : s.poligonoMapa)
+        : (imagen ? s.esquinasImagen : s.esquinasMapa);
+    if (pts.length < 3) continue;
+    final r = limitesDe(pts);
+    final a = r.width * r.height;
+    if (a > area) {
+      area = a;
+      mejor = pts;
+    }
+  }
+  return mejor;
 }
 
 // ---------------------------------------------------------------------------
 // Datos completos del mapa (lo que publica el administrador)
 // ---------------------------------------------------------------------------
 class DatosMapa {
-  const DatosMapa({required this.version, required this.salones, required this.caminos});
+  const DatosMapa({
+    required this.version,
+    required this.salones,
+    required this.caminos,
+    this.ajustes = const <String, dynamic>{},
+  });
 
   /// 0 = datos que vienen dentro de la app; al publicar es la hora en ms.
   final int version;
   final List<Salon> salones;
   final List<List<Offset>> caminos;
 
-  DatosMapa copyWith({int? version, List<Salon>? salones, List<List<Offset>>? caminos}) => DatosMapa(
+  /// Textos y valores que cambia el administrador (título, nombres de los
+  /// pisos, velocidad al caminar, punto de acceso…).
+  final Map<String, dynamic> ajustes;
+
+  DatosMapa copyWith({
+    int? version,
+    List<Salon>? salones,
+    List<List<Offset>>? caminos,
+    Map<String, dynamic>? ajustes,
+  }) =>
+      DatosMapa(
         version: version ?? this.version,
         salones: salones ?? this.salones,
         caminos: caminos ?? this.caminos,
+        ajustes: ajustes ?? this.ajustes,
       );
+
+  // ---------------------------------------------------------------- bloques
+  /// Nombres de los bloques (edificios), en el orden en que aparecen.
+  List<String> get bloques {
+    final vistos = <String>{};
+    return [
+      for (final s in salones)
+        if (s.edificio.isNotEmpty && vistos.add(s.edificio)) s.edificio,
+    ];
+  }
+
+  List<Salon> salonesDe(String bloque) => [for (final s in salones) if (s.edificio == bloque) s];
+
+  // ---------------------------------------------------------------- ajustes
+  String textoAjuste(String clave, String defecto) {
+    final v = ajustes[clave];
+    final t = v == null ? '' : '$v'.trim();
+    return t.isEmpty ? defecto : t;
+  }
+
+  double numeroAjuste(String clave, double defecto) {
+    final v = ajustes[clave];
+    if (v is num) return v.toDouble();
+    return double.tryParse('${v ?? ''}'.trim().replaceAll(',', '.')) ?? defecto;
+  }
+
+  String get titulo => textoAjuste('titulo', 'TecNM Campus Orizaba');
+  String get subtitulo => textoAjuste('subtitulo', 'Toca un salón o edificio en el mapa');
+
+  String nombrePiso(int piso) => switch (piso) {
+        1 => textoAjuste('pisoBaja', 'Planta baja'),
+        2 => textoAjuste('pisoAlta', 'Planta alta'),
+        _ => 'Piso $piso',
+      };
+
+  double get metrosPorMinuto => numeroAjuste('metrosPorMinuto', 80).clamp(20.0, 200.0).toDouble();
+  double get accesoLat => numeroAjuste('accesoLat', 18.85472947868148);
+  double get accesoLng => numeroAjuste('accesoLng', -97.09831297465401);
 
   Map<String, dynamic> toJson() => {
         'version': version,
         'salones': [for (final s in salones) s.toJson()],
         'caminos': [for (final c in caminos) _ptsAJson(c)],
+        'ajustes': ajustes,
       };
 
   String toJsonString() => const JsonEncoder.withIndent('  ').convert(toJson());
@@ -213,10 +407,12 @@ class DatosMapa {
       final pts = _ptsDeJson(c);
       if (pts.length >= 2) caminos.add(pts);
     }
+    final aj = j['ajustes'];
     return DatosMapa(
       version: (j['version'] as num?)?.toInt() ?? 0,
       salones: salones,
       caminos: caminos,
+      ajustes: aj is Map ? Map<String, dynamic>.from(aj) : const <String, dynamic>{},
     );
   }
 

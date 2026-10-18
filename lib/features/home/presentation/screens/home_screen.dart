@@ -50,13 +50,13 @@ const String _paqueteApp = 'com.example.orienta_tec';
 const String _rutaImagen = 'assets/images/campus_orizaba.png';
 
 const LatLng _centroCampus = LatLng(18.8552, -97.0981);
-const LatLng _accesoPrincipalGeo = LatLng(18.85472947868148, -97.09831297465401);
 
 const double _imgW = 1407;
 const double _imgH = 768;
 
 const double _metrosPorPixel = 0.3;
-const double _metrosPorMinuto = 80;
+// Se actualiza con el ajuste del administrador (metros por minuto).
+double _metrosPorMinuto = 80;
 const double _umbralDesvioM = 25;
 const double _radioLlegadaM = 12;
 
@@ -417,12 +417,6 @@ double _distanciaM(LatLng a, LatLng b) {
 // ---------------------------------------------------------------------------
 // Distribución de salones dentro de cada edificio
 // ---------------------------------------------------------------------------
-String _nombrePiso(int piso) => switch (piso) {
-      1 => 'Planta baja',
-      2 => 'Planta alta',
-      _ => 'Piso $piso',
-    };
-
 /// "Edificio 1" -> "1", "Edificio e" -> "E". Nombres largos se dejan igual.
 String _etiquetaCorta(String nombre) {
   final t = nombre.trim().replaceFirst(RegExp(r'^edificio\s+', caseSensitive: false), '');
@@ -533,12 +527,12 @@ Map<String, _DistribucionEdificio> _distribuirSalones(List<Salon> salones, bool 
       if (!repetido) contornos.add(pts);
     }
 
-    out[nombre] = _DistribucionEdificio(contornos, principal, _cajasDe(lista, principal));
+    out[nombre] = _DistribucionEdificio(contornos, principal, _cajasDe(columnasDeBloque(lista), principal));
   });
   return out;
 }
 
-List<_CajaSalon> _cajasDe(List<Salon> lista, List<Offset> contorno) {
+List<_CajaSalon> _cajasDe(List<List<Salon>> columnas, List<Offset> contorno) {
   // Eje largo del edificio = su lado más largo.
   var largoMax = 0.0;
   var eje = const Offset(0, -1);
@@ -572,13 +566,13 @@ List<_CajaSalon> _cajasDe(List<Salon> lista, List<Offset> contorno) {
   if (largo <= 0 || ancho <= 0) return const <_CajaSalon>[];
 
   final vertical = eje.dy.abs() >= eje.dx.abs();
-  final pisos = {for (final s in lista) s.piso}.toList()..sort();
-  final colAncho = ancho / pisos.length;
+  final colAncho = ancho / columnas.length;
   final cajas = <_CajaSalon>[];
 
-  for (var k = 0; k < pisos.length; k++) {
-    final delPiso = [for (final s in lista) if (s.piso == pisos[k]) s];
+  for (var k = 0; k < columnas.length; k++) {
+    final delPiso = columnas[k];
     final m = delPiso.length;
+    if (m == 0) continue;
     final slot = largo / m;
     final mitadAncho = colAncho * 0.40;
     final mitadLargo = math.min(slot * 0.40, mitadAncho * 1.4);
@@ -741,10 +735,12 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
 
   double get _mpp => _geo?.metrosPorPixel ?? _metrosPorPixel;
 
+  LatLng get _acceso => LatLng(_datos.accesoLat, _datos.accesoLng);
+
   Offset get _origen {
     final g = _geo;
     if (g != null) {
-      return g.aPlano(_accesoPrincipalGeo.latitude, _accesoPrincipalGeo.longitude);
+      return g.aPlano(_acceso.latitude, _acceso.longitude);
     }
     return const Offset(745, 397);
   }
@@ -798,7 +794,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     });
     final actual = _salon;
     if (actual == null) return;
-    final i = nuevos.salones.indexWhere((s) => s.numero == actual.numero);
+    final i = nuevos.salones.indexWhere((s) => s.clave == actual.clave);
     if (i < 0) {
       _limpiar();
       return;
@@ -817,7 +813,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     }
   }
 
-  bool _esActivo(Salon s) => widget.admin ? s.numero == _editor.salonSel : s == _salon;
+  bool _esActivo(Salon s) => widget.admin ? s.edificio == _editor.bloqueSel : s == _salon;
 
   double _radioToque() {
     final metrosPorPxPantalla = 156543.03392 * math.cos(_centroCampus.latitude * math.pi / 180) / math.pow(2, _zoom);
@@ -896,7 +892,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
   }
 
   void _registrarBusqueda(Salon s) {
-    final lista = <String>[s.numero, ..._historial.where((n) => n != s.numero)];
+    final lista = <String>[s.clave, ..._historial.where((n) => n != s.clave)];
     if (lista.length > _maxHistorial) {
       lista.removeRange(_maxHistorial, lista.length);
     }
@@ -1038,7 +1034,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
         const SnackBar(content: Text('Estás fuera del campus. Te mostramos el acceso principal.')),
       );
     }
-    _irA(_accesoPrincipalGeo, 18.5);
+    _irA(_acceso, 18.5);
   }
 
   Future<void> _iniciarUbicacion() async {
@@ -1106,7 +1102,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
 
   void _seleccionar(Salon s) {
     if (widget.admin) {
-      _editor.seleccionarSalon(s.numero);
+      _editor.seleccionarBloque(s.edificio);
       final g = _geo;
       if (g != null) {
         _irA(g.aLatLng(_verImagen ? s.centro : s.centroMapa), math.max(_zoom, 18.5));
@@ -1291,7 +1287,9 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     final sat = _verImagen;
 
     _distribucion.forEach((nombre, d) {
-      final elegido = nombre == _edificioSeleccionado || _salon?.edificio == nombre;
+      final elegido = nombre == _edificioSeleccionado ||
+          _salon?.edificio == nombre ||
+          (widget.admin && nombre == _editor.bloqueSel);
 
       // Edificio: azul claro con borde azul marino cuando se ven las cajitas.
       final Color relleno = _cajasVisibles
@@ -1384,11 +1382,14 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
             point: geo.aLatLng(c),
             width: 80,
             height: 30,
-            child: Center(
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => setState(() => _edificioSeleccionado = nombre),
-                child: _EtiquetaEdificio(nombre: _etiquetaCorta(nombre), activa: false),
+            child: IgnorePointer(
+              ignoring: widget.admin,
+              child: Center(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => setState(() => _edificioSeleccionado = nombre),
+                  child: _EtiquetaEdificio(nombre: _etiquetaCorta(nombre), activa: false),
+                ),
               ),
             ),
           ));
@@ -1412,10 +1413,13 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
               point: geo.aLatLng(c.centro),
               width: w,
               height: h,
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => _seleccionar(c.salon),
-                child: _TextoCaja(texto: c.salon.numero, activo: activo),
+              child: IgnorePointer(
+                ignoring: widget.admin,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => _seleccionar(c.salon),
+                  child: _TextoCaja(texto: c.salon.numero, activo: activo),
+                ),
               ),
             ));
           }
@@ -1436,7 +1440,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
 
       if (!_cerca && !_navegando) {
         out.add(Marker(
-          point: _accesoPrincipalGeo,
+          point: _acceso,
           width: 36,
           height: 36,
           child: const _MarcadorOrigen(),
@@ -1456,6 +1460,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
   @override
   Widget build(BuildContext context) {
     _seguro = MediaQuery.paddingOf(context);
+    _metrosPorMinuto = _datos.metrosPorMinuto;
     final p = Paleta.of(context);
     final geo = _geo;
     return AnnotatedRegion<SystemUiOverlayStyle>(
@@ -1861,7 +1866,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
       const SizedBox(height: 10),
       _FilaDetalle(icono: Icons.meeting_room_outlined, etiqueta: 'Tipo', valor: s.tipo),
       _FilaDetalle(icono: Icons.apartment_outlined, etiqueta: 'Edificio', valor: s.edificio),
-      _FilaDetalle(icono: Icons.layers_outlined, etiqueta: 'Nivel', valor: _nombrePiso(s.piso)),
+      _FilaDetalle(icono: Icons.layers_outlined, etiqueta: 'Nivel', valor: _datos.nombrePiso(s.piso)),
       const SizedBox(height: 6),
       Text(s.detalle, style: TextStyle(fontSize: 14, color: p.textoSec, height: 1.4)),
       const SizedBox(height: 22),
@@ -1871,7 +1876,10 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
         icono: _cerca ? Icons.my_location : Icons.trip_origin,
         texto: _cerca ? 'Parte desde tu ubicación' : 'Parte desde el acceso principal',
       ),
-      for (final paso in r.pasos) _PasoIndicacion(icono: paso.icono, texto: paso.texto),
+      if (s.indicaciones.isNotEmpty)
+        for (final texto in s.indicaciones) _PasoIndicacion(icono: Icons.arrow_forward_rounded, texto: texto)
+      else
+        for (final paso in r.pasos) _PasoIndicacion(icono: paso.icono, texto: paso.texto),
     ];
   }
 
@@ -1901,9 +1909,9 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
         }).toList();
         if (q.isEmpty && _historial.isNotEmpty) {
           final recientes = <Salon>[
-            for (final n in _historial) ...lista.where((s) => s.numero == n),
+            for (final n in _historial) ...lista.where((s) => s.clave == n),
           ];
-          final resto = lista.where((s) => !_historial.contains(s.numero));
+          final resto = lista.where((s) => !_historial.contains(s.clave));
           lista = [...recientes, ...resto];
         }
         if (lista.isEmpty) {
@@ -1925,7 +1933,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
             ),
             title: Text(s.nombre.replaceAll('Salón Salón', 'Salón')),
             subtitle: Text(s.ubicacion),
-            trailing: (q.isEmpty && _historial.contains(s.numero))
+            trailing: (q.isEmpty && _historial.contains(s.clave))
                 ? Icon(Icons.history, size: 20, color: p.textoSec)
                 : null,
             onTap: () {
@@ -1964,7 +1972,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
             const SizedBox(width: 8),
             _ChipMapa(
               icono: Icons.layers_outlined,
-              texto: _nombrePiso(piso),
+              texto: _datos.nombrePiso(piso),
               activo: _piso == piso,
               onTap: () => setState(() => _piso = _piso == piso ? null : piso),
             ),
@@ -2109,8 +2117,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('TecNM Campus Orizaba', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: p.acento)),
-                  Text('Toca un salón o edificio en el mapa', style: TextStyle(fontSize: 14, color: p.textoSec)),
+                  Text(_datos.titulo, style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: p.acento)),
+                  Text(_datos.subtitulo, style: TextStyle(fontSize: 14, color: p.textoSec)),
                 ],
               ),
             ),
@@ -2206,7 +2214,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
                     style: TextStyle(fontWeight: FontWeight.bold, color: p.acento, fontSize: 14),
                   ),
                   subtitle: Text(
-                    _nombrePiso(s.piso),
+                    _datos.nombrePiso(s.piso),
                     style: TextStyle(fontSize: 12, color: p.textoSec),
                   ),
                   trailing: Icon(Icons.navigation_outlined, color: p.acento, size: 20),
