@@ -1,10 +1,9 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'dart:convert';
-import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:orienta_tec/core/servicio_actualizacion.dart';
+import 'package:orienta_tec/core/servicio_fotos.dart';
 import 'package:flutter/foundation.dart' show ValueListenable, kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show SystemUiOverlayStyle;
@@ -45,6 +44,15 @@ const String _urlTilesOscuro =
 const String _textoAtribucionOscuro = _claveMapTiler == ''
     ? '© OpenStreetMap'
     : '© MapTiler © OpenStreetMap contributors';
+
+// Satélite real (Esri World Imagery). Ojo: en Esri el orden es {z}/{y}/{x}.
+const String _urlTilesSatelite =
+    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+// Zoom máximo con imagen real. Más allá de esto Esri solo estira los mosaicos
+// y se ve borroso (o aparece "Map data not yet available"). Si en tu campus
+// el último nivel se ve gris, baja este valor a 18.
+const double _zoomMaxSatelite = 19;
+const String _textoAtribucionSatelite = 'Esri, Maxar, Earthstar Geographics';
 
 const String _paqueteApp = 'com.example.orienta_tec';
 const String _rutaImagen = 'assets/images/campus_orizaba.png';
@@ -673,6 +681,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
   List<String> _historial = <String>[];
 
   bool _verImagen = false;
+  // Satélite real de Esri (excluyente con la imagen ilustrada del campus).
+  bool _satelite = false;
   EdgeInsets _seguro = EdgeInsets.zero;
   final ValueNotifier<double> _extHoja = ValueNotifier<double>(0);
 
@@ -1284,7 +1294,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
   List<Polygon> _poligonos(_GeoRef geo) {
     final p = Paleta.of(context);
     final out = <Polygon>[];
-    final sat = _verImagen;
+    final sat = _verImagen || _satelite;
 
     _distribucion.forEach((nombre, d) {
       final elegido = nombre == _edificioSeleccionado ||
@@ -1293,8 +1303,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
 
       // Edificio: azul claro con borde azul marino cuando se ven las cajitas.
       final Color relleno = _cajasVisibles
-          ? const Color(0xFF8FB0F5).withValues(alpha: sat ? 0.60 : 0.80)
-          : (sat ? Colors.white.withValues(alpha: 0.14) : p.mapa.withValues(alpha: p.oscuro ? 0.28 : 0.20));
+          ? const Color(0xFF8FB0F5).withValues(alpha: sat ? 0.45 : 0.80)
+          : (sat ? Colors.white.withValues(alpha: 0.05) : p.mapa.withValues(alpha: p.oscuro ? 0.28 : 0.20));
       final Color borde = elegido
           ? (p.oscuro ? _cian : _cianOscuro)
           : (_cajasVisibles ? _casing : (sat ? Colors.white : p.mapa));
@@ -1481,7 +1491,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
                     initialCenter: _centroCampus,
                     initialZoom: 17.5,
                     minZoom: 15,
-                    maxZoom: 21,
+                    maxZoom: _satelite ? _zoomMaxSatelite : 21,
                     cameraConstraint: CameraConstraint.containCenter(bounds: _limitesCamara),
                     interactionOptions: const InteractionOptions(flags: InteractiveFlag.all),
                     onMapReady: () {
@@ -1564,6 +1574,19 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
   }
 
   Widget _capaTiles(Paleta p) {
+    if (_satelite) {
+      return TileLayer(
+        urlTemplate: _urlTilesSatelite,
+        userAgentPackageName: _paqueteApp,
+        maxNativeZoom: _zoomMaxSatelite.toInt(),
+        // Sin fundido entre niveles (evita que se vea borroso mientras carga)
+        // y con mosaicos extra alrededor para que cargue antes de moverte.
+        tileDisplay: const TileDisplay.instantaneous(),
+        keepBuffer: 3,
+        panBuffer: 2,
+        retinaMode: RetinaMode.isHighDensity(context),
+      );
+    }
     if (!p.oscuro) {
       return TileLayer(
         urlTemplate: _urlTiles,
@@ -1637,7 +1660,25 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
           _BotonMapa(
             icono: _verImagen ? Icons.map_outlined : Icons.satellite_alt_outlined,
             tooltip: _verImagen ? 'Vista de mapa' : 'Vista satélite',
-            onPressed: () => setState(() => _verImagen = !_verImagen),
+            onPressed: () => setState(() {
+              _verImagen = !_verImagen;
+              if (_verImagen) _satelite = false;
+            }),
+          ),
+          const SizedBox(height: 8),
+          _BotonMapa(
+            icono: Icons.public,
+            tooltip: _satelite ? 'Vista de mapa' : 'Satélite real',
+            destacado: _satelite,
+            onPressed: () => setState(() {
+              _satelite = !_satelite;
+              if (_satelite) {
+                _verImagen = false;
+                if (_zoom > _zoomMaxSatelite) {
+                  _mapa.move(_mapa.camera.center, _zoomMaxSatelite);
+                }
+              }
+            }),
           ),
           const SizedBox(height: 8),
         ],
@@ -1667,9 +1708,9 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    const Padding(
-                      padding: EdgeInsets.only(left: 12, bottom: 12),
-                      child: _Atribucion(),
+                    Padding(
+                      padding: const EdgeInsets.only(left: 12, bottom: 12),
+                      child: _Atribucion(satelite: _satelite),
                     ),
                     const Spacer(),
                     Padding(
@@ -1711,7 +1752,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
                         Positioned(
                           left: 12,
                           bottom: ext * h + 10,
-                          child: const _Atribucion(),
+                          child: _Atribucion(satelite: _satelite),
                         ),
                         Positioned(
                           right: 12,
@@ -2486,86 +2527,63 @@ class _FotoSalon extends StatefulWidget {
 
 class _FotoSalonState extends State<_FotoSalon> {
   bool _subiendo = false;
-  late String _fotoActual;
+  // Foto compartida (la misma para todos los dispositivos).
+  FotoRemota? _foto;
+  StreamSubscription<FotoRemota?>? _sub;
 
   @override
   void initState() {
     super.initState();
-    _fotoActual = widget.salon.foto;
+    _escuchar();
   }
 
   @override
   void didUpdateWidget(covariant _FotoSalon oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.salon.numero != widget.salon.numero ||
-        oldWidget.salon.foto != widget.salon.foto) {
-      _fotoActual = widget.salon.foto;
+    if (oldWidget.salon.clave != widget.salon.clave) {
+      _foto = null;
+      _escuchar();
     }
   }
 
-  Future<void> _capturarYSubirFoto() async {
-    final picker = ImagePicker();
-    final XFile? imagen = await picker.pickImage(
-      source: ImageSource.camera,
-      imageQuality: 50,
-    );
+  @override
+  void dispose() {
+    _sub?.cancel();
+    super.dispose();
+  }
 
+  void _escuchar() {
+    _sub?.cancel();
+    _sub = ServicioFotos.observar(widget.salon.clave).listen((f) {
+      if (!mounted) return;
+      // Evita reconstruir si la foto es la misma que ya se muestra.
+      if (f?.marca == _foto?.marca && (f == null) == (_foto == null)) return;
+      setState(() => _foto = f);
+    });
+  }
+
+  void _aviso(String texto) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(texto)));
+  }
+
+  Future<void> _capturarYSubirFoto() async {
+    final XFile? imagen = await ImagePicker().pickImage(
+      source: ImageSource.camera,
+      maxWidth: 1280,
+      maxHeight: 1280,
+      imageQuality: 60,
+    );
     if (imagen == null) return;
 
     setState(() => _subiendo = true);
-
     try {
       final bytes = await imagen.readAsBytes();
-      final base64Image = base64Encode(bytes);
-      final dataUrl = "data:image/jpeg;base64,$base64Image";
-
-      final urlGet = Uri.parse(
-        "https://orienta-tec-administrador-default-rtdb.firebaseio.com/mapa/salones.json?auth=lgkRfa27my9DXMXylPgcalgRXNP4X92rgarwkT6r"
-      );
-      final response = await http.get(urlGet);
-
-      if (response.statusCode == 200) {
-        final decodedData = jsonDecode(response.body);
-        String? keyEncontrada;
-
-        if (decodedData is Map) {
-          decodedData.forEach((key, value) {
-            if (value != null && value['numero'].toString() == widget.salon.numero.toString()) {
-              keyEncontrada = key.toString();
-            }
-          });
-        } else if (decodedData is List) {
-          final index = decodedData.indexWhere(
-            (element) => element != null && element['numero'].toString() == widget.salon.numero.toString()
-          );
-          if (index != -1) keyEncontrada = index.toString();
-        }
-
-        if (keyEncontrada != null) {
-          final urlPut = Uri.parse(
-            "https://orienta-tec-administrador-default-rtdb.firebaseio.com/mapa/salones/$keyEncontrada/foto.json?auth=lgkRfa27my9DXMXylPgcalgRXNP4X92rgarwkT6r"
-          );
-          await http.put(urlPut, body: jsonEncode(dataUrl));
-
-          setState(() {
-            _fotoActual = dataUrl;
-          });
-
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('¡Foto actualizada con éxito!')),
-            );
-          }
-        } else {
-          throw Exception("No se encontró el salón en la base de datos.");
-        }
-      }
+      await ServicioFotos.guardar(widget.salon.clave, bytes);
+      if (mounted) setState(() => _foto = FotoRemota(bytes, DateTime.now().millisecondsSinceEpoch));
+      _aviso('¡Foto actualizada para todos!');
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error al guardar la foto: $e')),
-        );
-      }
+      _aviso('Error al guardar la foto: $e');
     } finally {
       if (mounted) setState(() => _subiendo = false);
     }
@@ -2589,57 +2607,15 @@ class _FotoSalonState extends State<_FotoSalon> {
         ],
       ),
     );
-
     if (confirmar != true) return;
 
     setState(() => _subiendo = true);
-
     try {
-      final urlGet = Uri.parse(
-        "https://orienta-tec-administrador-default-rtdb.firebaseio.com/mapa/salones.json?auth=lgkRfa27my9DXMXylPgcalgRXNP4X92rgarwkT6r"
-      );
-      final response = await http.get(urlGet);
-
-      if (response.statusCode == 200) {
-        final decodedData = jsonDecode(response.body);
-        String? keyEncontrada;
-
-        if (decodedData is Map) {
-          decodedData.forEach((key, value) {
-            if (value != null && value['numero'].toString() == widget.salon.numero.toString()) {
-              keyEncontrada = key.toString();
-            }
-          });
-        } else if (decodedData is List) {
-          final index = decodedData.indexWhere(
-            (element) => element != null && element['numero'].toString() == widget.salon.numero.toString()
-          );
-          if (index != -1) keyEncontrada = index.toString();
-        }
-
-        if (keyEncontrada != null) {
-          final urlDelete = Uri.parse(
-            "https://orienta-tec-administrador-default-rtdb.firebaseio.com/mapa/salones/$keyEncontrada/foto.json?auth=lgkRfa27my9DXMXylPgcalgRXNP4X92rgarwkT6r"
-          );
-          await http.delete(urlDelete);
-
-          setState(() {
-            _fotoActual = "";
-          });
-
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('La foto ha sido eliminada.')),
-            );
-          }
-        }
-      }
+      await ServicioFotos.borrar(widget.salon.clave);
+      if (mounted) setState(() => _foto = null);
+      _aviso('La foto ha sido eliminada.');
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error al eliminar: $e')),
-        );
-      }
+      _aviso('Error al eliminar: $e');
     } finally {
       if (mounted) setState(() => _subiendo = false);
     }
@@ -2648,7 +2624,7 @@ class _FotoSalonState extends State<_FotoSalon> {
   @override
   Widget build(BuildContext context) {
     final p = Paleta.of(context);
-    final tieneFoto = _fotoActual.isNotEmpty;
+    final tieneFoto = _foto != null;
 
     return Column(
       children: [
@@ -2659,22 +2635,12 @@ class _FotoSalonState extends State<_FotoSalon> {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                if (tieneFoto && _fotoActual.startsWith('data:image'))
+                if (tieneFoto)
                   Image.memory(
-                    base64Decode(_fotoActual.split(',').last),
+                    _foto!.bytes,
+                    key: ValueKey(_foto!.marca),
                     fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => _vistaVacia(p),
-                  )
-                else if (tieneFoto && _fotoActual.startsWith('http'))
-                  Image.network(
-                    _fotoActual,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => _vistaVacia(p),
-                  )
-                else if (tieneFoto)
-                  Image.asset(
-                    _fotoActual,
-                    fit: BoxFit.cover,
+                    gaplessPlayback: true,
                     errorBuilder: (_, __, ___) => _vistaVacia(p),
                   )
                 else
@@ -2893,7 +2859,8 @@ class _MarcadorUsuario extends StatelessWidget {
 }
 
 class _Atribucion extends StatelessWidget {
-  const _Atribucion();
+  const _Atribucion({this.satelite = false});
+  final bool satelite;
 
   @override
   Widget build(BuildContext context) {
@@ -2901,7 +2868,7 @@ class _Atribucion extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(color: p.superficie.withValues(alpha: 0.85), borderRadius: BorderRadius.circular(6)),
-      child: Text(p.oscuro ? _textoAtribucionOscuro : _textoAtribucion, style: TextStyle(fontSize: 10.5, color: p.texto)),
+      child: Text(satelite ? _textoAtribucionSatelite : (p.oscuro ? _textoAtribucionOscuro : _textoAtribucion), style: TextStyle(fontSize: 10.5, color: p.texto)),
     );
   }
 }
