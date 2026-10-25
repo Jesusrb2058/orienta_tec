@@ -10,9 +10,9 @@ import 'package:orienta_tec/core/catalogo_campus.dart';
 import 'package:orienta_tec/core/mapa_datos.dart';
 import 'package:orienta_tec/core/mapa_repositorio.dart';
 
-enum Herramienta { editar, nuevoSalon, nuevaRuta }
+enum Herramienta { editar, nuevoSalon, nuevoPin, nuevaRuta }
 
-enum ResultadoToque { nada, salonTerminado }
+enum ResultadoToque { nada, salonTerminado, pinColocado }
 
 const Color _ambar = Color(0xFFFFA000);
 const Color _verdeEd = Color(0xFF00C853);
@@ -44,8 +44,14 @@ class EditorMapa extends ChangeNotifier {
   final List<Offset> trazo = <Offset>[];
   bool _dibujoImagen = false;
 
-  /// Nombre del bloque (edificio) elegido.
+  /// Llave del bloque elegido (no su nombre: varios bloques pueden llamarse igual).
   String? bloqueSel;
+
+  /// Lugar donde se tocó para un pin nuevo (falta pedir su nombre y tipo).
+  Offset? pinPendiente;
+
+  /// true = el próximo toque en el mapa mueve el pin elegido.
+  bool moviendoPin = false;
   int? caminoSel;
   int? verticeSel;
 
@@ -55,6 +61,9 @@ class EditorMapa extends ChangeNotifier {
   }
 
   bool get hayBloqueSel => salonesSel.isNotEmpty;
+
+  /// ¿Lo elegido es un pin (y no un bloque)?
+  bool get pinSel => salonesSel.length == 1 && salonesSel.first.pin;
 
   /// Contorno del bloque elegido en la vista [imagen] (el de la otra vista si
   /// todavía no se dibujó el de esta).
@@ -113,6 +122,8 @@ class EditorMapa extends ChangeNotifier {
     herramienta = h;
     trazo.clear();
     verticeSel = null;
+    pinPendiente = null;
+    moviendoPin = false;
     if (h != Herramienta.editar) {
       bloqueSel = null;
       caminoSel = null;
@@ -128,6 +139,7 @@ class EditorMapa extends ChangeNotifier {
 
   void seleccionarBloque(String nombre) {
     herramienta = Herramienta.editar;
+    moviendoPin = false;
     bloqueSel = nombre;
     caminoSel = null;
     verticeSel = null;
@@ -136,6 +148,7 @@ class EditorMapa extends ChangeNotifier {
   }
 
   void deseleccionar() {
+    moviendoPin = false;
     bloqueSel = null;
     caminoSel = null;
     verticeSel = null;
@@ -165,6 +178,10 @@ class EditorMapa extends ChangeNotifier {
     switch (herramienta) {
       case Herramienta.nuevoSalon:
         return _tocarNuevoSalon(p, imagen);
+      case Herramienta.nuevoPin:
+        pinPendiente = redondear(p);
+        notifyListeners();
+        return ResultadoToque.pinColocado;
       case Herramienta.nuevaRuta:
         _tocarNuevaRuta(p, radio);
         return ResultadoToque.nada;
@@ -271,7 +288,7 @@ class EditorMapa extends ChangeNotifier {
     _aplicar(_datos.copyWith(
       salones: [
         for (final x in _datos.salones)
-          x.edificio == b
+          x.bloque == b
               ? (imagen ? x.copyWith(poligonoImagen: pts) : x.copyWith(poligonoMapa: pts))
               : x,
       ],
@@ -281,8 +298,22 @@ class EditorMapa extends ChangeNotifier {
   void _tocarEditar(Offset p, bool imagen, double radio) {
     final rh = radio * 1.2;
 
+    // --- Pin elegido y en modo "mover": el toque es su nuevo lugar.
+    if (pinSel && moviendoPin) {
+      final b = bloqueSel!;
+      final cuadro = cuadroDePin(p);
+      moviendoPin = false;
+      _aplicar(_datos.copyWith(
+        salones: [
+          for (final x in _datos.salones)
+            x.bloque == b ? x.copyWith(poligonoImagen: cuadro, poligonoMapa: cuadro) : x,
+        ],
+      ));
+      return;
+    }
+
     // --- Bloque elegido: mover / agregar puntos del contorno.
-    if (hayBloqueSel) {
+    if (hayBloqueSel && !pinSel) {
       final pts = List<Offset>.of(contornoSel(imagen));
       final v = verticeSel;
       if (v != null && v < pts.length) {
@@ -362,10 +393,20 @@ class EditorMapa extends ChangeNotifier {
 
     // --- Elegir otra cosa.
     verticeSel = null;
+    moviendoPin = false;
     for (final s in _datos.salones) {
+      if (s.pin && (s.centro - p).distance <= rh) {
+        bloqueSel = s.bloque;
+        caminoSel = null;
+        notifyListeners();
+        return;
+      }
+    }
+    for (final s in _datos.salones) {
+      if (s.pin) continue;
       final pts = imagen ? s.esquinasImagen : s.esquinasMapa;
       if (puntoCercaDePoligono(p, pts)) {
-        bloqueSel = s.edificio;
+        bloqueSel = s.bloque;
         caminoSel = null;
         notifyListeners();
         return;
@@ -396,27 +437,24 @@ class EditorMapa extends ChangeNotifier {
   String? crearBloque(String nombre, List<Salon> salones) {
     final b = nombre.trim();
     if (b.isEmpty) return 'Escribe el nombre del bloque.';
-    if (_datos.bloques.any((x) => x.toLowerCase() == b.toLowerCase())) {
-      return 'Ya existe un bloque con ese nombre.';
-    }
     if (salones.isEmpty) return 'Agrega al menos un salón.';
     if (trazo.length < 3) return 'Falta dibujar el contorno.';
-    final vistos = <String>{};
-    for (final s in salones) {
-      if (!vistos.add(s.numero.toLowerCase())) return 'El salón "${s.numero}" está repetido en el bloque.';
-    }
     final poly = List<Offset>.of(trazo);
+    // Llave propia: así puede haber varios bloques con el mismo nombre.
+    final bid = nuevoBid();
     final nuevos = [
       for (final s in salones)
         s.copyWith(
           edificio: b,
+          bid: bid,
+          sid: s.sid.isEmpty ? nuevoBid() : s.sid,
           poligonoImagen: _dibujoImagen ? poly : const <Offset>[],
           poligonoMapa: _dibujoImagen ? const <Offset>[] : poly,
         ),
     ];
     trazo.clear();
     herramienta = Herramienta.editar;
-    bloqueSel = b;
+    bloqueSel = bid;
     caminoSel = null;
     verticeSel = null;
     _aplicar(_datos.copyWith(salones: [..._datos.salones, ...nuevos]));
@@ -438,7 +476,7 @@ class EditorMapa extends ChangeNotifier {
     _aplicar(_datos.copyWith(
       salones: [
         for (final s in _datos.salones)
-          s.edificio == bloque ? s.copyWith(columna: asignada[s.clave]) : s,
+          s.bloque == bloque ? s.copyWith(columna: asignada[s.clave]) : s,
       ],
     ));
     return true;
@@ -456,9 +494,18 @@ class EditorMapa extends ChangeNotifier {
   /// Agrega salones al final de una columna del bloque. Los que ya existen se omiten.
   ({int agregados, int omitidos}) agregarSalones(String bloque, int piso, int columna, List<String> nombres) {
     final ref = _datos.salonesDe(bloque);
-    final existentes = {for (final s in ref) s.numero.toLowerCase()};
+    // Un mismo nombre puede repetirse en otro piso o columna del bloque
+    // (ej. Baños en planta baja y en planta alta); solo se omite si ya está
+    // en ese mismo piso y esa misma columna.
+    final existentes = {
+      for (final s in ref)
+        if (s.piso == piso && s.columna == columna) s.numero.toLowerCase(),
+    };
     final polImagen = contornoDeBloque(ref, true, propio: true);
     final polMapa = contornoDeBloque(ref, false, propio: true);
+    final nombreB = _datos.nombreBloque(bloque);
+    final bidRef = ref.isNotEmpty ? ref.first.bid : '';
+    final soloRef = ref.isNotEmpty && ref.first.soloNombre;
     final nuevos = <Salon>[];
     var omitidos = 0;
     for (final n in nombres) {
@@ -468,7 +515,10 @@ class EditorMapa extends ChangeNotifier {
       }
       nuevos.add(Salon(
         numero: n,
-        edificio: bloque,
+        edificio: nombreB,
+        bid: bidRef,
+        sid: nuevoBid(),
+        soloNombre: soloRef,
         piso: piso,
         columna: columna,
         tipo: tipoSugerido(n),
@@ -483,10 +533,13 @@ class EditorMapa extends ChangeNotifier {
   String? actualizarSalon(String claveOriginal, Salon nuevo) {
     final numero = nuevo.numero.trim();
     if (numero.isEmpty) return 'Escribe el nombre o número del salón.';
-    final cambio = nuevo.copyWith(numero: numero);
-    if (cambio.clave != claveOriginal && _datos.salones.any((s) => s.clave == cambio.clave)) {
-      return 'Ya existe "$numero" en este bloque.';
-    }
+    // Los salones viejos se identificaban por su nombre; al renombrarlos reciben
+    // un identificador propio para no chocar con otro salón del mismo nombre.
+    final original = _datos.salones.firstWhere((s) => s.clave == claveOriginal, orElse: () => nuevo);
+    final cambio = nuevo.copyWith(
+      numero: numero,
+      sid: nuevo.sid.isEmpty && numero != original.numero ? nuevoBid() : nuevo.sid,
+    );
     _aplicar(_datos.copyWith(
       salones: [for (final s in _datos.salones) s.clave == claveOriginal ? cambio : s],
     ));
@@ -497,7 +550,7 @@ class EditorMapa extends ChangeNotifier {
     verticeSel = null;
     final restantes = [for (final s in _datos.salones) if (s.clave != clave) s];
     final b = bloqueSel;
-    if (b != null && !restantes.any((s) => s.edificio == b)) bloqueSel = null;
+    if (b != null && !restantes.any((s) => s.bloque == b)) bloqueSel = null;
     _aplicar(_datos.copyWith(salones: restantes));
   }
 
@@ -506,7 +559,7 @@ class EditorMapa extends ChangeNotifier {
     if (b == null) return;
     bloqueSel = null;
     verticeSel = null;
-    _aplicar(_datos.copyWith(salones: [for (final s in _datos.salones) if (s.edificio != b) s]));
+    _aplicar(_datos.copyWith(salones: [for (final s in _datos.salones) if (s.bloque != b) s]));
   }
 
   /// Cambia el orden de un salón dentro de su columna (de arriba hacia abajo).
@@ -529,17 +582,70 @@ class EditorMapa extends ChangeNotifier {
     _aplicar(_datos.copyWith(salones: todos));
   }
 
-  String? renombrarBloque(String viejo, String nuevo) {
+  /// Cambia el nombre que se muestra del bloque con la llave [llave].
+  /// La llave no cambia, así que las fotos y rutas de sus salones se conservan.
+  String? renombrarBloque(String llave, String nuevo) {
     final n = nuevo.trim();
     if (n.isEmpty) return 'Escribe el nombre del bloque.';
-    if (n != viejo && _datos.bloques.any((b) => b.toLowerCase() == n.toLowerCase())) {
-      return 'Ya existe un bloque con ese nombre.';
-    }
-    if (bloqueSel == viejo) bloqueSel = n;
     _aplicar(_datos.copyWith(
-      salones: [for (final s in _datos.salones) s.edificio == viejo ? s.copyWith(edificio: n) : s],
+      salones: [
+        for (final s in _datos.salones)
+          s.bloque == llave ? s.copyWith(edificio: n, bid: s.bid.isEmpty ? llave : s.bid) : s,
+      ],
     ));
     return null;
+  }
+
+  /// Muestra todos los salones del bloque solo con su nombre (sin "Salón").
+  void fijarSoloNombre(String llave, bool valor) {
+    _aplicar(_datos.copyWith(
+      salones: [
+        for (final s in _datos.salones) s.bloque == llave ? s.copyWith(soloNombre: valor) : s,
+      ],
+    ));
+  }
+
+  // ------------------------------------------------------------------ pines
+  void cancelarPin() {
+    pinPendiente = null;
+    notifyListeners();
+  }
+
+  /// Crea el pin en el lugar que se tocó.
+  String? agregarPin(String nombre, String tipo) {
+    final n = nombre.trim();
+    final pos = pinPendiente;
+    if (n.isEmpty) return 'Escribe el nombre del pin.';
+    if (pos == null) return 'Toca el mapa para colocar el pin.';
+    final pin = crearPin(n, tipo, pos);
+    pinPendiente = null;
+    herramienta = Herramienta.editar;
+    bloqueSel = pin.bloque;
+    caminoSel = null;
+    verticeSel = null;
+    _aplicar(_datos.copyWith(salones: [..._datos.salones, pin]));
+    return null;
+  }
+
+  String? editarPin(String llave, String nombre, String tipo) {
+    final n = nombre.trim();
+    if (n.isEmpty) return 'Escribe el nombre del pin.';
+    _aplicar(_datos.copyWith(
+      salones: [
+        for (final s in _datos.salones) s.bloque == llave ? s.copyWith(numero: n, edificio: n, tipo: tipo) : s,
+      ],
+    ));
+    return null;
+  }
+
+  void iniciarMoverPin() {
+    moviendoPin = true;
+    notifyListeners();
+  }
+
+  void cancelarMoverPin() {
+    moviendoPin = false;
+    notifyListeners();
   }
 
   /// Guarda textos y valores de la app (título, pisos, velocidad, acceso…).
@@ -682,16 +788,25 @@ class EditorMapa extends ChangeNotifier {
       out.add('El acceso principal queda a ${(dOrigen * mpp).round()} m de la red de rutas.');
     }
     for (final b in _datos.bloques) {
+      final nb = _datos.nombreBloque(b);
       final cont = contornoDeBloque(_datos.salonesDe(b), true);
       if (cont.length < 3) {
-        out.add('El bloque $b no tiene contorno dibujado.');
+        out.add('El bloque $nb no tiene contorno dibujado.');
         continue;
       }
       final (d, g) = cercano(limitesDe(cont));
       if (g != gOrigen) {
-        out.add('El bloque $b: la ruta más cercana no está conectada con el acceso principal.');
+        out.add('El bloque $nb: la ruta más cercana no está conectada con el acceso principal.');
       } else if (d * mpp > 25) {
-        out.add('El bloque $b queda a ${(d * mpp).round()} m de la ruta más cercana.');
+        out.add('El bloque $nb queda a ${(d * mpp).round()} m de la ruta más cercana.');
+      }
+    }
+    for (final pin in _datos.pines) {
+      final (d, g) = cercano(Rect.fromLTWH(pin.centro.dx, pin.centro.dy, 0, 0));
+      if (g != gOrigen) {
+        out.add('El pin ${pin.numero}: la ruta más cercana no está conectada con el acceso principal.');
+      } else if (d * mpp > 25) {
+        out.add('El pin ${pin.numero} queda a ${(d * mpp).round()} m de la ruta más cercana.');
       }
     }
     return out;
@@ -774,8 +889,15 @@ class EditorMapa extends ChangeNotifier {
       }
     }
 
+    // Pin nuevo (esperando nombre) y pin elegido.
+    final pend = pinPendiente;
+    if (pend != null) marcas.add(_marcador(aLatLng(pend), 22, _verdeEd, Colors.white, grosor: 3));
+    if (pinSel) {
+      marcas.add(_marcador(aLatLng(salonesSel.first.centro), 40, Colors.transparent, moviendoPin ? _rosaEd : _cianEd, grosor: 4));
+    }
+
     // Bloque elegido: esquinas grandes y puntos medios.
-    if (hayBloqueSel) {
+    if (hayBloqueSel && !pinSel) {
       final pts = contornoSel(imagen);
       for (var i = 0; i < pts.length; i++) {
         marcas.add(_marcador(aLatLng((pts[i] + pts[(i + 1) % pts.length]) / 2), 10, Colors.transparent, _cianEd));
@@ -828,6 +950,7 @@ class _DialogoSalonState extends State<_DialogoSalon> {
   late final TextEditingController _tipo = TextEditingController(text: widget.base.tipo);
   late final TextEditingController _desc = TextEditingController(text: widget.base.descripcion);
   late final TextEditingController _ind = TextEditingController(text: widget.base.indicaciones.join('\n'));
+  late bool _solo = widget.base.soloNombre;
 
   @override
   void dispose() {
@@ -852,6 +975,7 @@ class _DialogoSalonState extends State<_DialogoSalon> {
         columna: col == null ? b.columna : math.max(0, col - 1),
         tipo: tipo.isEmpty ? 'Aula' : tipo,
         descripcion: _desc.text.trim(),
+        soloNombre: _solo,
         indicaciones: [
           for (final l in _ind.text.split('\n'))
             if (l.trim().isNotEmpty) l.trim(),
@@ -880,6 +1004,13 @@ class _DialogoSalonState extends State<_DialogoSalon> {
               decoration: const InputDecoration(labelText: 'Columna dentro del bloque (1, 2, 3…)'),
             ),
             TextField(controller: _tipo, decoration: const InputDecoration(labelText: 'Tipo (Aula, Laboratorio, Oficina…)')),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Mostrar solo el nombre'),
+              subtitle: const Text('Sin la palabra "Salón" (ej. Biblioteca, Baños)'),
+              value: _solo,
+              onChanged: (v) => setState(() => _solo = v),
+            ),
             TextField(
               controller: _desc,
               maxLines: 2,
@@ -913,8 +1044,10 @@ class ColumnaForm {
 }
 
 class FormBloque {
-  FormBloque({this.nombre = '', List<ColumnaForm>? columnas}) : columnas = columnas ?? [ColumnaForm()];
+  FormBloque({this.nombre = '', this.soloNombre = false, List<ColumnaForm>? columnas})
+      : columnas = columnas ?? [ColumnaForm()];
   String nombre;
+  bool soloNombre;
   List<ColumnaForm> columnas;
 }
 
@@ -943,6 +1076,7 @@ class _DialogoBloqueState extends State<_DialogoBloque> {
   final List<TextEditingController> _textos = <TextEditingController>[];
   final List<TextEditingController> _descartados = <TextEditingController>[];
   final List<int> _pisos = <int>[];
+  late bool _solo = widget.inicial?.soloNombre ?? false;
 
   @override
   void initState() {
@@ -983,6 +1117,7 @@ class _DialogoBloqueState extends State<_DialogoBloque> {
       context,
       FormBloque(
         nombre: _nombre.text.trim(),
+        soloNombre: _solo,
         columnas: [
           for (var i = 0; i < _textos.length; i++) ColumnaForm(piso: _pisos[i], texto: _textos[i].text),
         ],
@@ -1007,7 +1142,14 @@ class _DialogoBloqueState extends State<_DialogoBloque> {
                 textCapitalization: TextCapitalization.words,
                 decoration: const InputDecoration(labelText: 'Nombre del bloque (ej. Centro de Cómputo)'),
               ),
-              const SizedBox(height: 14),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Mostrar solo el nombre'),
+                subtitle: const Text('Para lugares que no son un salón (Biblioteca, Cafetería, Baños). Puede repetirse el nombre.'),
+                value: _solo,
+                onChanged: (v) => setState(() => _solo = v),
+              ),
+              const SizedBox(height: 8),
               Text('Columnas de salones', style: tema.titleSmall),
               const SizedBox(height: 2),
               Text(
@@ -1075,7 +1217,7 @@ Future<void> crearSalonDibujado(BuildContext context, EditorMapa editor) async {
     for (var k = 0; k < form.columnas.length; k++) {
       final c = form.columnas[k];
       for (final n in expandirSalones(c.texto)) {
-        salones.add(Salon(numero: n, edificio: nombre, piso: c.piso, columna: k, tipo: tipoSugerido(n)));
+        salones.add(Salon(numero: n, edificio: nombre, piso: c.piso, columna: k, tipo: tipoSugerido(n), soloNombre: form.soloNombre));
       }
     }
     final error = editor.crearBloque(nombre, salones);
@@ -1087,19 +1229,16 @@ Future<void> crearSalonDibujado(BuildContext context, EditorMapa editor) async {
 }
 
 // ------------------------------------------------------------ nombre del bloque
-Future<void> editarNombreBloque(BuildContext context, EditorMapa editor, String actual) async {
-  var texto = actual;
-  while (true) {
-    final nuevo = await showDialog<String>(
-      context: context,
-      builder: (_) => _DialogoNombre(inicial: texto),
-    );
-    if (nuevo == null || nuevo.trim() == actual) return;
-    final error = editor.renombrarBloque(actual, nuevo);
-    if (error == null) return;
-    if (!context.mounted) return;
+Future<void> editarNombreBloque(BuildContext context, EditorMapa editor, String llave) async {
+  final actual = editor.datos.nombreBloque(llave);
+  final nuevo = await showDialog<String>(
+    context: context,
+    builder: (_) => _DialogoNombre(inicial: actual),
+  );
+  if (nuevo == null || nuevo.trim() == actual) return;
+  final error = editor.renombrarBloque(llave, nuevo);
+  if (error != null && context.mounted) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error)));
-    texto = nuevo;
   }
 }
 
@@ -1203,7 +1342,7 @@ class _DialogoSalonesState extends State<_DialogoSalones> {
   Widget build(BuildContext context) {
     final tema = Theme.of(context).textTheme;
     return AlertDialog(
-      title: Text('Salones de ${widget.bloque}'),
+      title: Text('Salones de ${widget.editor.datos.nombreBloque(widget.bloque)}'),
       content: SizedBox(
         width: double.maxFinite,
         child: ListenableBuilder(
@@ -1326,6 +1465,91 @@ class _DialogoSalonesState extends State<_DialogoSalones> {
         ),
       ),
       actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Listo'))],
+    );
+  }
+}
+
+// ------------------------------------------------------------------- pines
+/// Pide nombre y tipo del pin que se acaba de tocar en el mapa.
+Future<void> colocarPin(BuildContext context, EditorMapa editor) async {
+  var inicial = ('', tiposPin.first);
+  while (true) {
+    final r = await showDialog<(String, String)>(
+      context: context,
+      builder: (_) => _DialogoPin(titulo: 'Nuevo pin', nombre: inicial.$1, tipo: inicial.$2),
+    );
+    if (r == null) {
+      editor.cancelarPin();
+      return;
+    }
+    final error = editor.agregarPin(r.$1, r.$2);
+    if (error == null) return;
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error)));
+    inicial = r;
+  }
+}
+
+Future<void> editarPinDialogo(BuildContext context, EditorMapa editor, Salon pin) async {
+  final r = await showDialog<(String, String)>(
+    context: context,
+    builder: (_) => _DialogoPin(titulo: 'Editar pin', nombre: pin.numero, tipo: pin.tipo),
+  );
+  if (r == null) return;
+  final error = editor.editarPin(pin.bloque, r.$1, r.$2);
+  if (error != null && context.mounted) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error)));
+  }
+}
+
+class _DialogoPin extends StatefulWidget {
+  const _DialogoPin({required this.titulo, required this.nombre, required this.tipo});
+  final String titulo;
+  final String nombre;
+  final String tipo;
+
+  @override
+  State<_DialogoPin> createState() => _DialogoPinState();
+}
+
+class _DialogoPinState extends State<_DialogoPin> {
+  late final TextEditingController _nombre = TextEditingController(text: widget.nombre);
+  late String _tipo = widget.tipo;
+
+  @override
+  void dispose() {
+    _nombre.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tipos = tiposPin.contains(_tipo) ? tiposPin : [...tiposPin, _tipo];
+    return AlertDialog(
+      title: Text(widget.titulo),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextField(
+            controller: _nombre,
+            autofocus: true,
+            textCapitalization: TextCapitalization.words,
+            decoration: const InputDecoration(labelText: 'Nombre (ej. Entrada principal, Cancha de futbol)'),
+          ),
+          const SizedBox(height: 14),
+          DropdownButton<String>(
+            value: _tipo,
+            isExpanded: true,
+            onChanged: (v) => setState(() => _tipo = v ?? _tipo),
+            items: [for (final t in tipos) DropdownMenuItem(value: t, child: Text(t))],
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancelar')),
+        FilledButton(onPressed: () => Navigator.pop(context, (_nombre.text, _tipo)), child: const Text('Guardar')),
+      ],
     );
   }
 }
@@ -1532,6 +1756,7 @@ class PanelEditor extends StatelessWidget {
               children: [
                 _chipHerramienta(Herramienta.editar, Icons.edit_location_alt_outlined, 'Editar'),
                 _chipHerramienta(Herramienta.nuevoSalon, Icons.crop_square, 'Nuevo bloque'),
+                _chipHerramienta(Herramienta.nuevoPin, Icons.place_outlined, 'Nuevo pin'),
                 _chipHerramienta(Herramienta.nuevaRuta, Icons.timeline, 'Nueva ruta'),
               ],
             ),
@@ -1598,6 +1823,11 @@ class PanelEditor extends StatelessWidget {
             if (n > 0) TextButton(onPressed: editor.cancelarTrazo, child: const Text('Cancelar')),
           ],
         );
+      case Herramienta.nuevoPin:
+        return Text(
+          'Toca el mapa donde va el pin (entrada, cancha, estacionamiento…).',
+          style: estilo,
+        );
       case Herramienta.nuevaRuta:
         final n = editor.trazo.length;
         return Wrap(
@@ -1630,8 +1860,42 @@ class PanelEditor extends StatelessWidget {
     }
   }
 
+  Widget _contextoPin(BuildContext context, TextStyle estilo) {
+    final pin = editor.salonesSel.first;
+    return Wrap(
+      spacing: 8,
+      runSpacing: 4,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        Text('Pin · ${pin.numero} (${pin.tipo})', style: estilo.copyWith(fontWeight: FontWeight.w700)),
+        if (editor.moviendoPin) ...[
+          Text('Toca el mapa para colocarlo en su nuevo lugar.', style: estilo),
+          TextButton(onPressed: editor.cancelarMoverPin, child: const Text('Cancelar')),
+        ] else ...[
+          FilledButton.tonalIcon(
+            onPressed: () => editarPinDialogo(context, editor, pin),
+            icon: const Icon(Icons.edit_outlined, size: 18),
+            label: const Text('Editar'),
+          ),
+          TextButton.icon(
+            onPressed: editor.iniciarMoverPin,
+            icon: const Icon(Icons.open_with, size: 18),
+            label: const Text('Mover'),
+          ),
+          TextButton.icon(
+            onPressed: () => _confirmar(context, '¿Eliminar el pin ${pin.numero}?', editor.eliminarBloqueSeleccionado),
+            icon: const Icon(Icons.delete_outline, size: 18),
+            label: const Text('Eliminar'),
+          ),
+        ],
+      ],
+    );
+  }
+
   Widget _contextoBloque(BuildContext context, TextStyle estilo) {
-    final nombre = editor.bloqueSel!;
+    if (editor.pinSel) return _contextoPin(context, estilo);
+    final llave = editor.bloqueSel!;
+    final nombre = editor.datos.nombreBloque(llave);
     final salones = editor.salonesSel;
     final propio = editor.contornoPropio(imagen);
     final v = editor.verticeSel;
@@ -1653,13 +1917,19 @@ class PanelEditor extends StatelessWidget {
           TextButton(onPressed: editor.cancelarVertice, child: const Text('Cancelar')),
         ] else ...[
           Text('Toca un punto para moverlo o un círculo vacío para agregar uno.', style: estilo),
+          FilterChip(
+            label: const Text('Solo nombre'),
+            tooltip: 'Muestra "Biblioteca" en vez de "Salón Biblioteca"',
+            selected: salones.every((s) => s.soloNombre),
+            onSelected: (v) => editor.fijarSoloNombre(llave, v),
+          ),
           FilledButton.tonalIcon(
-            onPressed: () => gestionarSalones(context, editor, nombre),
+            onPressed: () => gestionarSalones(context, editor, llave),
             icon: const Icon(Icons.meeting_room_outlined, size: 18),
             label: const Text('Salones'),
           ),
           TextButton.icon(
-            onPressed: () => editarNombreBloque(context, editor, nombre),
+            onPressed: () => editarNombreBloque(context, editor, llave),
             icon: const Icon(Icons.edit_outlined, size: 18),
             label: const Text('Nombre'),
           ),

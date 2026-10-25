@@ -1,0 +1,25 @@
+{
+  "id": "/",
+  "name": "Orienta Tec",
+  "short_name": "Orienta Tec",
+  "description": "Mapa del TecNM Campus Orizaba con rutas a tu salón.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#ffffff",
+  "theme_color": "#1b396a",
+  "lang": "es",
+  "icons": [
+    {
+      "src": "/icons/icono_chico.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icono_512.png",
+      "sizes": "1152x1152",
+      "type": "image/png"
+    }
+  ]
+}

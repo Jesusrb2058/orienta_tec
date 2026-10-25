@@ -2,7 +2,7 @@ name: orienta_tec
 description: "A new Flutter project."
 publish_to: 'none'
 
-version: 1.0.4+5
+version: 1.0.7+8
 
 environment:
   sdk: ^3.13.4

@@ -46,13 +46,46 @@ const String _textoAtribucionOscuro = _claveMapTiler == ''
     : '© MapTiler © OpenStreetMap contributors';
 
 // Satélite real (Esri World Imagery). Ojo: en Esri el orden es {z}/{y}/{x}.
-const String _urlTilesSatelite =
+// Esri "Clarity": imagen más reciente y nítida. Si algún mosaico no existe se
+// usa el World Imagery normal. Para volver solo al normal, pon
+// _usarClarity = false.
+const bool _usarClarity = true;
+const String _urlTilesSateliteNormal =
     'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+const String _urlTilesSateliteClarity =
+    'https://clarity.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+// Esri Wayback: versión fija de la imagen (la que se ve bien en tu campus).
+// Pon aquí el NÚMERO de la versión (release) de la fecha elegida, por ejemplo
+// la de 2022-08-10. Si lo dejas vacío se usa Clarity/normal como antes.
+const String _waybackRelease = '17825';
+const String _urlTilesSateliteWayback =
+    'https://wayback.maptiles.arcgis.com/arcgis/rest/services/world_imagery/mapserver/tile/$_waybackRelease/{z}/{y}/{x}';
+const String _urlTilesSatelite = _waybackRelease != ''
+    ? _urlTilesSateliteWayback
+    : (_usarClarity ? _urlTilesSateliteClarity : _urlTilesSateliteNormal);
 // Zoom máximo con imagen real. Más allá de esto Esri solo estira los mosaicos
 // y se ve borroso (o aparece "Map data not yet available"). Si en tu campus
 // el último nivel se ve gris, baja este valor a 18.
-const double _zoomMaxSatelite = 19;
-const String _textoAtribucionSatelite = 'Esri, Maxar, Earthstar Geographics';
+// Prueba de MapTiler Satellite v4. La llave NO va en el código: se pasa al
+// compilar/ejecutar con --dart-define=MAPTILER_KEY=tu_llave
+const String _claveSatMapTiler = String.fromEnvironment('MAPTILER_KEY');
+const double _zoomMaxSatelite = _claveSatMapTiler == '' ? 19 : 20;
+
+// Aclara el satélite. Para más luz sube _brilloSatelite (1.0 = sin cambio) y
+// _sumaSatelite (0 a 40); para menos, bájalos.
+const double _brilloSatelite = 1.28;
+const double _sumaSatelite = 18;
+const ColorFilter _filtroSatelite = ColorFilter.matrix(<double>[
+  _brilloSatelite, 0, 0, 0, _sumaSatelite,
+  0, _brilloSatelite, 0, 0, _sumaSatelite,
+  0, 0, _brilloSatelite, 0, _sumaSatelite,
+  0, 0, 0, 1, 0,
+]);
+const String _urlTilesSateliteMapTiler =
+    'https://api.maptiler.com/maps/satellite-v4/256/{z}/{x}/{y}.jpg?key=$_claveSatMapTiler';
+const String _textoAtribucionSatelite = _claveSatMapTiler == ''
+    ? 'Esri, Maxar, Earthstar Geographics'
+    : '© MapTiler © Maxar, Airbus';
 
 const String _paqueteApp = 'com.example.orienta_tec';
 const String _rutaImagen = 'assets/images/campus_orizaba.png';
@@ -238,7 +271,9 @@ class _Red {
       final n = math.max(1, (largo / 5).ceil());
       for (var k = 0; k <= n; k++) {
         final p = Offset.lerp(e.a, e.b, k / n)!;
-        final d = (p - _limitarARect(p, zona)).distance;
+        // Distancia al centro del destino: así se elige el punto de la ruta
+        // más cercano al salón (y no el primero que lo roza).
+        final d = (p - zona.center).distance;
         if (mejor == null || d < mejor.distancia) {
           mejor = _Hallazgo(i, p, d);
         }
@@ -425,6 +460,22 @@ double _distanciaM(LatLng a, LatLng b) {
 // ---------------------------------------------------------------------------
 // Distribución de salones dentro de cada edificio
 // ---------------------------------------------------------------------------
+IconData _iconoPin(String tipo) {
+  final t = sinAcentos(tipo);
+  if (t.contains('entrada') || t.contains('puerta') || t.contains('acceso')) return Icons.login;
+  if (t.contains('cancha') || t.contains('campo') || t.contains('futbol') || t.contains('deport')) return Icons.sports_soccer;
+  if (t.contains('estacion')) return Icons.local_parking;
+  return Icons.place;
+}
+
+Color _colorPin(String tipo) {
+  final t = sinAcentos(tipo);
+  if (t.contains('entrada') || t.contains('puerta') || t.contains('acceso')) return const Color(0xFF2E7D32);
+  if (t.contains('cancha') || t.contains('campo') || t.contains('futbol') || t.contains('deport')) return const Color(0xFFEF6C00);
+  if (t.contains('estacion')) return const Color(0xFF1565C0);
+  return const Color(0xFF6A1B9A);
+}
+
 /// "Edificio 1" -> "1", "Edificio e" -> "E". Nombres largos se dejan igual.
 String _etiquetaCorta(String nombre) {
   final t = nombre.trim().replaceFirst(RegExp(r'^edificio\s+', caseSensitive: false), '');
@@ -477,7 +528,10 @@ class _CajaSalon {
 }
 
 class _DistribucionEdificio {
-  const _DistribucionEdificio(this.contornos, this.principal, this.cajas);
+  const _DistribucionEdificio(this.nombre, this.contornos, this.principal, this.cajas);
+
+  /// Nombre que se muestra (varios bloques pueden llamarse igual).
+  final String nombre;
 
   /// Contornos que se dibujan del edificio.
   final List<List<Offset>> contornos;
@@ -494,8 +548,8 @@ class _DistribucionEdificio {
 Map<String, _DistribucionEdificio> _distribuirSalones(List<Salon> salones, bool imagen) {
   final porEdificio = <String, List<Salon>>{};
   for (final s in salones) {
-    if (s.edificio.isEmpty) continue;
-    porEdificio.putIfAbsent(s.edificio, () => <Salon>[]).add(s);
+    if (s.edificio.isEmpty || s.pin) continue;
+    porEdificio.putIfAbsent(s.bloque, () => <Salon>[]).add(s);
   }
 
   final out = <String, _DistribucionEdificio>{};
@@ -535,7 +589,7 @@ Map<String, _DistribucionEdificio> _distribuirSalones(List<Salon> salones, bool 
       if (!repetido) contornos.add(pts);
     }
 
-    out[nombre] = _DistribucionEdificio(contornos, principal, _cajasDe(columnasDeBloque(lista), principal));
+    out[nombre] = _DistribucionEdificio(lista.first.edificio, contornos, principal, _cajasDe(columnasDeBloque(lista), principal));
   });
   return out;
 }
@@ -734,13 +788,25 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
   List<int> get _pisosDisponibles => ({for (final s in _salones) s.piso}.toList()..sort());
 
   Offset _centroCaja(Salon s) {
-    final d = _distribucion[s.edificio];
+    final d = _distribucion[s.bloque];
     if (d != null) {
       for (final c in d.cajas) {
         if (c.salon == s) return c.centro;
       }
     }
     return _verImagen ? s.centro : s.centroMapa;
+  }
+
+  /// Zona a la que se dirige la ruta: la cajita del salón (no todo el bloque),
+  /// para que la ruta termine en el punto del camino más cercano a ese salón.
+  Rect _destinoRuta(Salon s) {
+    final d = _distribucion[s.bloque];
+    if (d != null) {
+      for (final c in d.cajas) {
+        if (c.salon == s) return Rect.fromCenter(center: c.centro, width: c.anchoPx, height: c.altoPx);
+      }
+    }
+    return s.area;
   }
 
   double get _mpp => _geo?.metrosPorPixel ?? _metrosPorPixel;
@@ -823,7 +889,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     }
   }
 
-  bool _esActivo(Salon s) => widget.admin ? s.edificio == _editor.bloqueSel : s == _salon;
+  bool _esActivo(Salon s) => widget.admin ? s.bloque == _editor.bloqueSel : s == _salon;
 
   double _radioToque() {
     final metrosPorPxPantalla = 156543.03392 * math.cos(_centroCampus.latitude * math.pi / 180) / math.pow(2, _zoom);
@@ -834,6 +900,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     final r = _editor.alTocar(plano, imagen: _verImagen, radio: _radioToque());
     if (r == ResultadoToque.salonTerminado) {
       await crearSalonDibujado(context, _editor);
+    } else if (r == ResultadoToque.pinColocado) {
+      await colocarPin(context, _editor);
     }
   }
 
@@ -899,6 +967,11 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
       final prefs = await SharedPreferences.getInstance();
       await prefs.setStringList(_claveHistorial, lista);
     } catch (_) {}
+  }
+
+  void _borrarHistorial() {
+    setState(() => _historial = <String>[]);
+    _guardarHistorial(<String>[]);
   }
 
   void _registrarBusqueda(Salon s) {
@@ -1008,7 +1081,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
         pts.add(geo.aLatLng(p));
       }
     }
-    _ajustarA(pts, maxZoom: 18);
+    _ajustarA(pts, maxZoom: _satelite ? 17.5 : 18);
   }
 
   void _enfocarRuta() {
@@ -1112,14 +1185,14 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
 
   void _seleccionar(Salon s) {
     if (widget.admin) {
-      _editor.seleccionarBloque(s.edificio);
+      _editor.seleccionarBloque(s.bloque);
       final g = _geo;
       if (g != null) {
         _irA(g.aLatLng(_verImagen ? s.centro : s.centroMapa), math.max(_zoom, 18.5));
       }
       return;
     }
-    final pts = _red.ruta(_origenRuta, s.area);
+    final pts = _red.ruta(_origenRuta, _destinoRuta(s));
     if (pts == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('No hay una ruta disponible al ${s.nombre.replaceAll('Salón Salón', 'Salón')}.')),
@@ -1161,7 +1234,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
   void _iniciar() {
     final s = _salon;
     if (s == null) return;
-    final pts = _red.ruta(_origenRuta, s.area);
+    final pts = _red.ruta(_origenRuta, _destinoRuta(s));
     if (pts == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('No hay una ruta disponible al ${s.nombre.replaceAll('Salón Salón', 'Salón')}.')),
@@ -1278,7 +1351,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
 
     final s = _salon;
     if (s == null) return;
-    final pts = _red.ruta(desde, s.area);
+    final pts = _red.ruta(desde, _destinoRuta(s));
     if (pts == null) return;
     setState(() {
       _ruta = _construirRuta(pts, s, _mpp);
@@ -1288,7 +1361,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
   }
 
   List<Salon> _obtenerSalonesPorEdificio(String edificio) {
-    return _salones.where((s) => s.edificio == edificio).toList();
+    return _salones.where((s) => s.bloque == edificio).toList();
   }
 
   List<Polygon> _poligonos(_GeoRef geo) {
@@ -1298,7 +1371,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
 
     _distribucion.forEach((nombre, d) {
       final elegido = nombre == _edificioSeleccionado ||
-          _salon?.edificio == nombre ||
+          _salon?.bloque == nombre ||
           (widget.admin && nombre == _editor.bloqueSel);
 
       // Edificio: azul claro con borde azul marino cuando se ven las cajitas.
@@ -1398,7 +1471,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTap: () => setState(() => _edificioSeleccionado = nombre),
-                  child: _EtiquetaEdificio(nombre: _etiquetaCorta(nombre), activa: false),
+                  child: _EtiquetaEdificio(nombre: _etiquetaCorta(d.nombre), activa: false),
                 ),
               ),
             ),
@@ -1434,6 +1507,58 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
             ));
           }
         });
+      }
+
+      // Pines (entradas, canchas, estacionamientos…): solo marcador, sin bloque.
+      for (final pin in _datos.pines) {
+        final activo = _esActivo(pin);
+        if (_ruta != null && !activo) continue;
+        final col = _colorPin(pin.tipo);
+        out.add(Marker(
+          point: geo.aLatLng(pin.centro),
+          width: 110,
+          height: 58,
+          alignment: const Alignment(0, -0.45),
+          child: IgnorePointer(
+            ignoring: widget.admin,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => _seleccionar(pin),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 32,
+                    height: 32,
+                    decoration: BoxDecoration(
+                      color: activo ? _rosa : col,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 2.5),
+                      boxShadow: const [BoxShadow(color: Colors.black38, blurRadius: 4, offset: Offset(0, 1))],
+                    ),
+                    child: Icon(_iconoPin(pin.tipo), color: Colors.white, size: 18),
+                  ),
+                  if (_etiquetasVisibles)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        pin.numero,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.white,
+                          shadows: [Shadow(color: Colors.black, blurRadius: 3), Shadow(color: Colors.black, blurRadius: 6)],
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ));
       }
 
       final sSel = _salon;
@@ -1490,8 +1615,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
                   options: MapOptions(
                     initialCenter: _centroCampus,
                     initialZoom: 17.5,
-                    minZoom: 15,
-                    maxZoom: _satelite ? _zoomMaxSatelite : 21,
+                    minZoom: 14.5,
+                    maxZoom: 22,
                     cameraConstraint: CameraConstraint.containCenter(bounds: _limitesCamara),
                     interactionOptions: const InteractionOptions(flags: InteractiveFlag.all),
                     onMapReady: () {
@@ -1510,9 +1635,11 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
                       }
                       
                       final s = _salonEn(plano);
-                      if (s != null) {
+                      if (s != null && s.pin) {
+                        _seleccionar(s);
+                      } else if (s != null) {
                         setState(() {
-                          _edificioSeleccionado = s.edificio;
+                          _edificioSeleccionado = s.bloque;
                         });
                       } else {
                         setState(() {
@@ -1574,17 +1701,35 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
   }
 
   Widget _capaTiles(Paleta p) {
-    if (_satelite) {
+    if (_satelite && _claveSatMapTiler != '') {
+      // Imagen tipo Google (Maxar/Airbus) con tu llave de MapTiler.
       return TileLayer(
-        urlTemplate: _urlTilesSatelite,
+        urlTemplate: _urlTilesSateliteMapTiler,
         userAgentPackageName: _paqueteApp,
         maxNativeZoom: _zoomMaxSatelite.toInt(),
+        maxZoom: 22,
+        tileDisplay: const TileDisplay.instantaneous(),
+        keepBuffer: 3,
+        panBuffer: 2,
+        retinaMode: RetinaMode.isHighDensity(context),
+      );
+    }
+    if (_satelite) {
+      return ColorFiltered(
+        colorFilter: _filtroSatelite,
+        child: TileLayer(
+        urlTemplate: _urlTilesSatelite,
+        fallbackUrl: (_usarClarity || _waybackRelease != '') ? _urlTilesSateliteNormal : null,
+        userAgentPackageName: _paqueteApp,
+        maxNativeZoom: _zoomMaxSatelite.toInt(),
+        maxZoom: 22,
         // Sin fundido entre niveles (evita que se vea borroso mientras carga)
         // y con mosaicos extra alrededor para que cargue antes de moverte.
         tileDisplay: const TileDisplay.instantaneous(),
         keepBuffer: 3,
         panBuffer: 2,
         retinaMode: RetinaMode.isHighDensity(context),
+      ),
       );
     }
     if (!p.oscuro) {
@@ -1614,7 +1759,12 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
   }
 
   Salon? _salonEn(Offset p) {
+    final rt = _radioToque() * 1.2;
     for (final s in _salones) {
+      if (s.pin && (s.centro - p).distance <= rt) return s;
+    }
+    for (final s in _salones) {
+      if (s.pin) continue;
       if (puntoCercaDePoligono(p, _verImagen ? s.esquinasImagen : s.esquinasMapa)) return s;
     }
     return null;
@@ -1658,24 +1808,18 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
       children: [
         if (_geo != null) ...[
           _BotonMapa(
-            icono: _verImagen ? Icons.map_outlined : Icons.satellite_alt_outlined,
-            tooltip: _verImagen ? 'Vista de mapa' : 'Vista satélite',
-            onPressed: () => setState(() {
-              _verImagen = !_verImagen;
-              if (_verImagen) _satelite = false;
-            }),
-          ),
-          const SizedBox(height: 8),
-          _BotonMapa(
-            icono: Icons.public,
-            tooltip: _satelite ? 'Vista de mapa' : 'Satélite real',
+            icono: _satelite ? Icons.map_outlined : Icons.satellite_alt_outlined,
+            tooltip: _satelite ? 'Vista de mapa' : 'Vista satélite',
             destacado: _satelite,
             onPressed: () => setState(() {
               _satelite = !_satelite;
               if (_satelite) {
                 _verImagen = false;
-                if (_zoom > _zoomMaxSatelite) {
-                  _mapa.move(_mapa.camera.center, _zoomMaxSatelite);
+                // Al abrir el satélite se muestra todo el campus para que no
+                // queden salones fuera de la pantalla (solo si no hay ruta
+                // ni un salón seleccionado).
+                if (!_navegando && _salon == null) {
+                  WidgetsBinding.instance.addPostFrameCallback((_) => _verCampus());
                 }
               }
             }),
@@ -1906,7 +2050,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
       const _TituloSeccion('Detalles'),
       const SizedBox(height: 10),
       _FilaDetalle(icono: Icons.meeting_room_outlined, etiqueta: 'Tipo', valor: s.tipo),
-      _FilaDetalle(icono: Icons.apartment_outlined, etiqueta: 'Edificio', valor: s.edificio),
+      if (!s.pin) _FilaDetalle(icono: Icons.apartment_outlined, etiqueta: 'Edificio', valor: s.edificio),
       _FilaDetalle(icono: Icons.layers_outlined, etiqueta: 'Nivel', valor: _datos.nombrePiso(s.piso)),
       const SizedBox(height: 6),
       Text(s.detalle, style: TextStyle(fontSize: 14, color: p.textoSec, height: 1.4)),
@@ -1946,7 +2090,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
       suggestionsBuilder: (context, controller) {
         final q = controller.text.trim().toLowerCase();
         var lista = _salones.where((s) {
-          return q.isEmpty || s.numero.contains(q) || s.nombre.toLowerCase().contains(q) || s.edificio.toLowerCase().contains(q);
+          return q.isEmpty || s.numero.contains(q) || s.nombre.toLowerCase().contains(q) || s.edificio.toLowerCase().contains(q) || (s.pin && s.tipo.toLowerCase().contains(q));
         }).toList();
         if (q.isEmpty && _historial.isNotEmpty) {
           final recientes = <Salon>[
@@ -1963,14 +2107,16 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
             ),
           ];
         }
-        return lista.map(
+        final tiles = lista.map(
           (s) => ListTile(
             leading: Container(
               width: 44,
               height: 44,
               alignment: Alignment.center,
-              decoration: BoxDecoration(color: p.primario, borderRadius: BorderRadius.circular(12)),
-              child: Text(s.numero, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+              decoration: BoxDecoration(color: s.pin ? _colorPin(s.tipo) : p.primario, borderRadius: BorderRadius.circular(12)),
+              child: s.pin
+                  ? Icon(_iconoPin(s.tipo), color: Colors.white, size: 24)
+                  : Text(s.numero, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
             ),
             title: Text(s.nombre.replaceAll('Salón Salón', 'Salón')),
             subtitle: Text(s.ubicacion),
@@ -1983,7 +2129,38 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
               _seleccionar(s);
             },
           ),
-        );
+        ).toList();
+        if (q.isEmpty && _historial.isNotEmpty) {
+          return [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 8, 0),
+              child: Row(
+                children: [
+                  Icon(Icons.history, size: 18, color: p.textoSec),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Búsquedas recientes',
+                      style: TextStyle(fontWeight: FontWeight.w700, color: p.textoSec),
+                    ),
+                  ),
+                  TextButton.icon(
+                    onPressed: () {
+                      _borrarHistorial();
+                      // Fuerza a la lista a reconstruirse sin los recientes.
+                      controller.text = ' ';
+                      controller.text = '';
+                    },
+                    icon: const Icon(Icons.delete_sweep_outlined, size: 18),
+                    label: const Text('Borrar historial'),
+                  ),
+                ],
+              ),
+            ),
+            ...tiles,
+          ];
+        }
+        return tiles;
       },
     );
   }
@@ -2180,6 +2357,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
   Widget _panelSalonesDeEdificio(String edificio) {
     final p = Paleta.of(context);
     final salonesEdif = _obtenerSalonesPorEdificio(edificio);
+    final nombreEdif = _datos.nombreBloque(edificio);
 
     return Column(
       key: ValueKey('salones_$edificio'),
@@ -2202,11 +2380,13 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    edificio,
+                    nombreEdif,
                     style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: p.acento),
                   ),
                   Text(
-                    '${salonesEdif.length} salones disponibles',
+                    salonesEdif.length == 1 && salonesEdif.first.sinPrefijo
+                        ? '1 lugar disponible'
+                        : '${salonesEdif.length} salones disponibles',
                     style: TextStyle(fontSize: 12, color: p.textoSec),
                   ),
                 ],
@@ -2245,10 +2425,12 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
                       color: p.primario,
                       borderRadius: BorderRadius.circular(10),
                     ),
-                    child: Text(
-                      s.numero,
-                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
-                    ),
+                    child: s.sinPrefijo
+                        ? const Icon(Icons.place, color: Colors.white, size: 20)
+                        : Text(
+                            s.numero,
+                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
+                          ),
                   ),
                   title: Text(
                     s.nombre.replaceAll('Salón Salón', 'Salón'),
@@ -2567,9 +2749,9 @@ class _FotoSalonState extends State<_FotoSalon> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(texto)));
   }
 
-  Future<void> _capturarYSubirFoto() async {
+  Future<void> _subirFoto(ImageSource fuente) async {
     final XFile? imagen = await ImagePicker().pickImage(
-      source: ImageSource.camera,
+      source: fuente,
       maxWidth: 1280,
       maxHeight: 1280,
       imageQuality: 60,
@@ -2672,22 +2854,27 @@ class _FotoSalonState extends State<_FotoSalon> {
           ),
         ),
         const SizedBox(height: 10),
-        SizedBox(
-          width: double.infinity,
-          child: OutlinedButton.icon(
-            onPressed: _subiendo ? null : _capturarYSubirFoto,
-            icon: const Icon(Icons.add_a_photo_outlined, size: 18),
-            label: const Text("Añadir / Cambiar foto del salón"),
-            style: OutlinedButton.styleFrom(
-              foregroundColor: p.acento,
-              side: BorderSide(color: p.acento),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-            ),
-          ),
+        Row(
+          children: [
+            Expanded(child: _botonFoto(p, Icons.add_a_photo_outlined, 'Tomar foto', ImageSource.camera)),
+            const SizedBox(width: 10),
+            Expanded(child: _botonFoto(p, Icons.photo_library_outlined, 'Galería', ImageSource.gallery)),
+          ],
         ),
       ],
+    );
+  }
+
+  Widget _botonFoto(Paleta p, IconData icono, String texto, ImageSource fuente) {
+    return OutlinedButton.icon(
+      onPressed: _subiendo ? null : () => _subirFoto(fuente),
+      icon: Icon(icono, size: 18),
+      label: Text(texto),
+      style: OutlinedButton.styleFrom(
+        foregroundColor: p.acento,
+        side: BorderSide(color: p.acento),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
     );
   }
 
@@ -2774,9 +2961,17 @@ class _BotonMapa extends StatelessWidget {
     return Material(
       color: destacado ? p.primario : p.superficie,
       elevation: 4,
+      animationDuration: const Duration(milliseconds: 300),
       shape: const CircleBorder(),
       child: IconButton(
-        icon: Icon(icono, color: destacado ? Colors.white : p.acento),
+        icon: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 300),
+          transitionBuilder: (hijo, anim) => RotationTransition(
+            turns: Tween<double>(begin: 0.75, end: 1).animate(anim),
+            child: ScaleTransition(scale: anim, child: FadeTransition(opacity: anim, child: hijo)),
+          ),
+          child: Icon(icono, key: ValueKey(icono), color: destacado ? Colors.white : p.acento),
+        ),
         tooltip: tooltip,
         onPressed: onPressed,
       ),
@@ -2883,8 +3078,6 @@ class _BotonBrujula extends StatelessWidget {
     return ValueListenableBuilder<double>(
       valueListenable: rotacion,
       builder: (context, grados, _) {
-        final g = grados % 360;
-        if (g < 0.5 || g > 359.5) return const SizedBox.shrink();
         final p = Paleta.of(context);
         return Padding(
           padding: const EdgeInsets.only(bottom: 8),

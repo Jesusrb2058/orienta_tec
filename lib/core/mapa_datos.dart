@@ -92,6 +92,10 @@ class Salon {
     this.descripcion = '',
     this.columna = -1,
     this.indicaciones = const <String>[],
+    this.bid = '',
+    this.sid = '',
+    this.soloNombre = false,
+    this.pin = false,
     this.poligonoImagen = const <Offset>[],
     this.poligonoMapa = const <Offset>[],
   });
@@ -112,8 +116,31 @@ class Salon {
   /// Vacío = la app genera las indicaciones sola a partir de la ruta.
   final List<String> indicaciones;
 
+  /// Identificador interno del bloque. Vacío en los bloques viejos (entonces
+  /// se usa el nombre). Permite tener varios bloques con el MISMO nombre
+  /// (ej. varios "Baños Hombres" en el campus).
+  final String bid;
+
+  /// Identificador propio del salón. Permite que dos salones del mismo bloque
+  /// tengan el mismo nombre (ej. "Baños Hombres" en planta baja y en alta).
+  /// Vacío en los salones viejos: entonces se identifican por su nombre.
+  final String sid;
+
+  /// true = se muestra solo el nombre ("Biblioteca"), sin la palabra "Salón".
+  final bool soloNombre;
+
+  /// true = es un pin (entrada, cancha, estacionamiento…) y no un bloque.
+  /// Su "contorno" es un cuadrito diminuto y se dibuja como marcador.
+  final bool pin;
+
+  /// Llave única del bloque (no cambia aunque se renombre el edificio).
+  String get bloque => bid.isNotEmpty ? bid : edificio;
+
   /// Identificador único: el mismo nombre puede repetirse en otro bloque.
-  String get clave => '$edificio|$numero';
+  String get clave => sid.isNotEmpty ? '$bloque|#$sid' : '$bloque|$numero';
+
+  /// ¿Se muestra solo con su nombre (sin "Salón")?
+  bool get sinPrefijo => soloNombre || pin;
 
   /// Contorno sobre la imagen del campus (vista satélite), en px del plano.
   final List<Offset> poligonoImagen;
@@ -133,13 +160,22 @@ class Salon {
   Offset get centro => area.center;
   Offset get centroMapa => limitesDe(esquinasMapa).center;
 
-  String get nombre => 'Salón $numero';
-  String get ubicacion => '$edificio, piso $piso';
+  bool get _mismoNombre => sinAcentos(edificio.trim()) == sinAcentos(numero.trim());
+
+  String get nombre => sinPrefijo ? numero : 'Salón $numero';
+  String get ubicacion {
+    if (pin) return tipo;
+    if (soloNombre && _mismoNombre) return tipo == 'Aula' ? 'Piso $piso' : tipo;
+    return '$edificio, piso $piso';
+  }
   String get foto => 'assets/images/salones/$numero.jpg';
 
-  String get detalle => descripcion.isEmpty
-      ? '$tipo ubicada en el $edificio, en el piso $piso.'
-      : descripcion;
+  String get detalle {
+    if (descripcion.isNotEmpty) return descripcion;
+    if (pin) return tipo;
+    if (soloNombre && _mismoNombre) return tipo == 'Aula' ? 'Ubicado en el piso $piso.' : '$tipo, piso $piso.';
+    return '$tipo ubicada en el $edificio, en el piso $piso.';
+  }
 
   Salon copyWith({
     String? numero,
@@ -149,6 +185,10 @@ class Salon {
     String? descripcion,
     int? columna,
     List<String>? indicaciones,
+    String? bid,
+    String? sid,
+    bool? soloNombre,
+    bool? pin,
     List<Offset>? poligonoImagen,
     List<Offset>? poligonoMapa,
   }) =>
@@ -160,6 +200,10 @@ class Salon {
         descripcion: descripcion ?? this.descripcion,
         columna: columna ?? this.columna,
         indicaciones: indicaciones ?? this.indicaciones,
+        bid: bid ?? this.bid,
+        sid: sid ?? this.sid,
+        soloNombre: soloNombre ?? this.soloNombre,
+        pin: pin ?? this.pin,
         poligonoImagen: poligonoImagen ?? this.poligonoImagen,
         poligonoMapa: poligonoMapa ?? this.poligonoMapa,
       );
@@ -172,6 +216,10 @@ class Salon {
         'descripcion': descripcion,
         'columna': columna,
         'indicaciones': indicaciones,
+        if (bid.isNotEmpty) 'bid': bid,
+        if (sid.isNotEmpty) 'sid': sid,
+        if (soloNombre) 'soloNombre': true,
+        if (pin) 'pin': true,
         'imagen': _ptsAJson(poligonoImagen),
         'mapa': _ptsAJson(poligonoMapa),
       };
@@ -184,6 +232,10 @@ class Salon {
         descripcion: '${j['descripcion'] ?? ''}',
         columna: (j['columna'] as num?)?.toInt() ?? -1,
         indicaciones: _textos(j['indicaciones']),
+        bid: '${j['bid'] ?? ''}',
+        sid: '${j['sid'] ?? ''}',
+        soloNombre: j['soloNombre'] == true,
+        pin: j['pin'] == true,
         poligonoImagen: _ptsDeJson(j['imagen']),
         poligonoMapa: _ptsDeJson(j['mapa']),
       );
@@ -205,6 +257,45 @@ List<String> _textos(Object? v) {
     for (final e in items)
       if ('$e'.trim().isNotEmpty) '$e'.trim(),
   ];
+}
+
+int _contadorBid = 0;
+
+/// Llave nueva para un bloque o pin (única en cada llamada).
+String nuevoBid() =>
+    'b${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}${(_contadorBid++).toRadixString(36)}';
+
+/// Tipos que se pueden elegir para un pin.
+const List<String> tiposPin = ['Entrada', 'Cancha', 'Estacionamiento', 'Otro'];
+
+/// Medio lado (px del plano) del cuadrito que representa a un pin.
+const double _mitadPin = 1.5;
+
+/// Crea un pin en [pos] (px del plano): un "salón" diminuto que se dibuja
+/// como marcador. Sirve igual para buscarlo y trazar la ruta hacia él.
+List<Offset> cuadroDePin(Offset pos) {
+  final c = redondear(pos);
+  return [
+    Offset(c.dx - _mitadPin, c.dy - _mitadPin),
+    Offset(c.dx + _mitadPin, c.dy - _mitadPin),
+    Offset(c.dx + _mitadPin, c.dy + _mitadPin),
+    Offset(c.dx - _mitadPin, c.dy + _mitadPin),
+  ];
+}
+
+Salon crearPin(String nombre, String tipo, Offset pos) {
+  final cuadro = cuadroDePin(pos);
+  return Salon(
+    numero: nombre,
+    edificio: nombre,
+    piso: 1,
+    tipo: tipo,
+    bid: nuevoBid(),
+    pin: true,
+    soloNombre: true,
+    poligonoImagen: cuadro,
+    poligonoMapa: cuadro,
+  );
 }
 
 String sinAcentos(String s) {
@@ -346,16 +437,27 @@ class DatosMapa {
       );
 
   // ---------------------------------------------------------------- bloques
-  /// Nombres de los bloques (edificios), en el orden en que aparecen.
+  /// Llaves de los bloques (no de los pins), en el orden en que aparecen.
+  /// Dos bloques pueden tener el mismo nombre; la llave nunca se repite.
   List<String> get bloques {
     final vistos = <String>{};
     return [
       for (final s in salones)
-        if (s.edificio.isNotEmpty && vistos.add(s.edificio)) s.edificio,
+        if (!s.pin && s.edificio.isNotEmpty && vistos.add(s.bloque)) s.bloque,
     ];
   }
 
-  List<Salon> salonesDe(String bloque) => [for (final s in salones) if (s.edificio == bloque) s];
+  List<Salon> salonesDe(String bloque) => [for (final s in salones) if (s.bloque == bloque) s];
+
+  /// Nombre que se muestra del bloque con esa llave.
+  String nombreBloque(String bloque) {
+    for (final s in salones) {
+      if (s.bloque == bloque) return s.edificio;
+    }
+    return bloque;
+  }
+
+  List<Salon> get pines => [for (final s in salones) if (s.pin) s];
 
   // ---------------------------------------------------------------- ajustes
   String textoAjuste(String clave, String defecto) {

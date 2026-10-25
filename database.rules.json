@@ -1,0 +1,16 @@
+{
+  "rules": {
+    "mapa": { ".read": true, ".write": "auth != null" },
+    "version_app": { ".read": true, ".write": "auth != null" },
+    "fotos": {
+      "$salon": {
+        ".read": true,
+        ".write": true,
+        ".validate": "newData.hasChildren(['d','t']) && newData.child('d').isString() && newData.child('d').val().length < 900000",
+        "d": { ".validate": "newData.isString()" },
+        "t": { ".validate": "newData.isNumber()" },
+        "$otro": { ".validate": false }
+      }
+    }
+  }
+}
