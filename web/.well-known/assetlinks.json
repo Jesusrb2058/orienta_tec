@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.example.orienta_tec",
+      "sha256_cert_fingerprints": [
+        "15:E9:91:EE:2F:E4:76:CE:5B:CE:FB:7E:A8:EA:84:FE:0D:98:E1:B2:3A:77:34:63:BB:EE:CA:12:91:9C:19:44"
+      ]
+    }
+  }
+]

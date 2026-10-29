@@ -3,13 +3,17 @@ import 'dart:math' as math;
 
 import 'package:image_picker/image_picker.dart';
 import 'package:orienta_tec/core/servicio_actualizacion.dart';
+import 'package:orienta_tec/core/iconos_salon.dart';
+import 'package:orienta_tec/core/servicio_comunidad.dart';
 import 'package:orienta_tec/core/servicio_fotos.dart';
-import 'package:flutter/foundation.dart' show ValueListenable, kDebugMode;
+import 'package:flutter/foundation.dart' show ValueListenable, kDebugMode, kIsWeb;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show SystemUiOverlayStyle;
+import 'package:flutter/services.dart' show Clipboard, ClipboardData, SystemUiOverlayStyle;
+import 'package:app_links/app_links.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart' show LatLng;
+import 'package:qr_flutter/qr_flutter.dart';
 import 'package:orienta_tec/app/theme/tema_app.dart';
 import 'package:orienta_tec/core/mapa_datos.dart';
 import 'package:orienta_tec/core/mapa_repositorio.dart';
@@ -45,34 +49,23 @@ const String _textoAtribucionOscuro = _claveMapTiler == ''
     ? '© OpenStreetMap'
     : '© MapTiler © OpenStreetMap contributors';
 
-// Satélite real (Esri World Imagery). Ojo: en Esri el orden es {z}/{y}/{x}.
-// Esri "Clarity": imagen más reciente y nítida. Si algún mosaico no existe se
-// usa el World Imagery normal. Para volver solo al normal, pon
-// _usarClarity = false.
+// Satélite real (Esri World Imagery).
 const bool _usarClarity = true;
 const String _urlTilesSateliteNormal =
     'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
 const String _urlTilesSateliteClarity =
     'https://clarity.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
-// Esri Wayback: versión fija de la imagen (la que se ve bien en tu campus).
-// Pon aquí el NÚMERO de la versión (release) de la fecha elegida, por ejemplo
-// la de 2022-08-10. Si lo dejas vacío se usa Clarity/normal como antes.
 const String _waybackRelease = '17825';
 const String _urlTilesSateliteWayback =
     'https://wayback.maptiles.arcgis.com/arcgis/rest/services/world_imagery/mapserver/tile/$_waybackRelease/{z}/{y}/{x}';
 const String _urlTilesSatelite = _waybackRelease != ''
     ? _urlTilesSateliteWayback
     : (_usarClarity ? _urlTilesSateliteClarity : _urlTilesSateliteNormal);
-// Zoom máximo con imagen real. Más allá de esto Esri solo estira los mosaicos
-// y se ve borroso (o aparece "Map data not yet available"). Si en tu campus
-// el último nivel se ve gris, baja este valor a 18.
-// Prueba de MapTiler Satellite v4. La llave NO va en el código: se pasa al
-// compilar/ejecutar con --dart-define=MAPTILER_KEY=tu_llave
+
 const String _claveSatMapTiler = String.fromEnvironment('MAPTILER_KEY');
 const double _zoomMaxSatelite = _claveSatMapTiler == '' ? 19 : 20;
 
-// Aclara el satélite. Para más luz sube _brilloSatelite (1.0 = sin cambio) y
-// _sumaSatelite (0 a 40); para menos, bájalos.
+// Aclara el satélite.
 const double _brilloSatelite = 1.28;
 const double _sumaSatelite = 18;
 const ColorFilter _filtroSatelite = ColorFilter.matrix(<double>[
@@ -96,14 +89,18 @@ const double _imgW = 1407;
 const double _imgH = 768;
 
 const double _metrosPorPixel = 0.3;
-// Se actualiza con el ajuste del administrador (metros por minuto).
 double _metrosPorMinuto = 80;
 const double _umbralDesvioM = 25;
 const double _radioLlegadaM = 12;
 
 const Rect _zonaCampus = Rect.fromLTWH(-260, -260, _imgW + 520, _imgH + 520);
-const double _zoomEtiquetas = 16.5;
-// A partir de este zoom cada salón se dibuja como una cajita dentro de su edificio.
+
+// ---------------------------------------------------------------------------
+// Umbrales de Zoom Ajustados
+// ---------------------------------------------------------------------------
+// Estos valores garantizan que al iniciar (zoom 17.2) no se vean ni los nombres ni las cajitas.
+const double _zoomEtiquetas = 17.6;
+const double _zoomEtiquetasEdificios = 17.8;
 const double _zoomSalones = 18.6;
 
 // ---------------------------------------------------------------------------
@@ -271,8 +268,6 @@ class _Red {
       final n = math.max(1, (largo / 5).ceil());
       for (var k = 0; k <= n; k++) {
         final p = Offset.lerp(e.a, e.b, k / n)!;
-        // Distancia al centro del destino: así se elige el punto de la ruta
-        // más cercano al salón (y no el primero que lo roza).
         final d = (p - zona.center).distance;
         if (mejor == null || d < mejor.distancia) {
           mejor = _Hallazgo(i, p, d);
@@ -396,7 +391,10 @@ String _metros(double px, double mpp) {
   return '${math.max(5, (m / 5).round() * 5)} m';
 }
 
-_Ruta _construirRuta(List<Offset> crudo, Salon destino, double mpp) {
+/// [escalera]: null = el destino está en planta baja (sin paso de escaleras);
+/// '' = hay que subir pero no hay escaleras registradas; otro texto = nombre
+/// de las escaleras más cercanas al salón.
+_Ruta _construirRuta(List<Offset> crudo, Salon destino, double mpp, {String? escalera}) {
   final pts = _simplificar(crudo);
   final pasos = <_Paso>[];
   final acumulado = <double>[0];
@@ -419,6 +417,11 @@ _Ruta _construirRuta(List<Offset> crudo, Salon destino, double mpp) {
     } else {
       pasos.add(_Paso(Icons.turn_left, 'Gira a la izquierda', 'Gira a la izquierda y avanza $d'));
     }
+  }
+  if (escalera != null && destino.piso > 1) {
+    final donde = destino.piso == 2 ? 'la planta alta' : 'el piso ${destino.piso}';
+    final cuales = escalera.isEmpty ? 'las escaleras más cercanas' : 'las escaleras más cercanas ($escalera)';
+    pasos.add(_Paso(Icons.stairs_outlined, 'Sube a $donde', 'Sube por $cuales hasta $donde'));
   }
   pasos.add(_Paso(Icons.flag_rounded, 'Llegas a ${destino.nombre.replaceAll('Salón Salón', 'Salón')}', 'Llegaste a ${destino.nombre.replaceAll('Salón Salón', 'Salón')}'));
   return _Ruta(pts, pasos, acumulado, mpp);
@@ -460,8 +463,16 @@ double _distanciaM(LatLng a, LatLng b) {
 // ---------------------------------------------------------------------------
 // Distribución de salones dentro de cada edificio
 // ---------------------------------------------------------------------------
+bool _esReunion(String t) => t.contains('reunion') || t.contains('evacuacion') || t.contains('emergencia');
+bool _esAreaVerde(String t) => t.contains('area verde') || t.contains('jardin') || t.contains('parque');
+
+bool _esCajero(String t) => t.contains('cajero') || t.contains('banco') || t.contains('banamex') || t.contains('atm');
+
 IconData _iconoPin(String tipo) {
   final t = sinAcentos(tipo);
+  if (_esCajero(t)) return Icons.atm;
+  if (_esReunion(t)) return Icons.groups;
+  if (_esAreaVerde(t)) return Icons.park;
   if (t.contains('entrada') || t.contains('puerta') || t.contains('acceso')) return Icons.login;
   if (t.contains('cancha') || t.contains('campo') || t.contains('futbol') || t.contains('deport')) return Icons.sports_soccer;
   if (t.contains('estacion')) return Icons.local_parking;
@@ -470,20 +481,21 @@ IconData _iconoPin(String tipo) {
 
 Color _colorPin(String tipo) {
   final t = sinAcentos(tipo);
+  if (_esCajero(t)) return const Color(0xFFD32F2F);
+  if (_esReunion(t)) return const Color(0xFF00893A); // verde de señalización de seguridad
+  if (_esAreaVerde(t)) return const Color(0xFF7CB342);
   if (t.contains('entrada') || t.contains('puerta') || t.contains('acceso')) return const Color(0xFF2E7D32);
   if (t.contains('cancha') || t.contains('campo') || t.contains('futbol') || t.contains('deport')) return const Color(0xFFEF6C00);
   if (t.contains('estacion')) return const Color(0xFF1565C0);
   return const Color(0xFF6A1B9A);
 }
 
-/// "Edificio 1" -> "1", "Edificio e" -> "E". Nombres largos se dejan igual.
 String _etiquetaCorta(String nombre) {
   final t = nombre.trim().replaceFirst(RegExp(r'^edificio\s+', caseSensitive: false), '');
   if (t.isEmpty) return nombre;
   return t.length <= 3 ? t.toUpperCase() : t;
 }
 
-/// Parte un nombre largo en dos renglones parejos: "Objetos Perdidos" -> "Objetos\nPerdidos".
 String _partirEtiqueta(String texto) {
   final s = texto.trim();
   if (s.length <= 6 || !s.contains(' ')) return s;
@@ -517,34 +529,20 @@ Rect _envolvente(List<Offset> pts) {
 class _CajaSalon {
   const _CajaSalon(this.salon, this.esquinas, this.centro, this.anchoPx, this.altoPx);
   final Salon salon;
-
-  /// Contorno de la cajita en px del plano.
   final List<Offset> esquinas;
   final Offset centro;
-
-  /// Tamaño en px del plano medido en horizontal y vertical de la pantalla.
   final double anchoPx;
   final double altoPx;
 }
 
 class _DistribucionEdificio {
   const _DistribucionEdificio(this.nombre, this.contornos, this.principal, this.cajas);
-
-  /// Nombre que se muestra (varios bloques pueden llamarse igual).
   final String nombre;
-
-  /// Contornos que se dibujan del edificio.
   final List<List<Offset>> contornos;
-
-  /// El contorno más grande: dentro de él se reparten los salones.
   final List<Offset> principal;
   final List<_CajaSalon> cajas;
 }
 
-/// Agrupa los salones por edificio y los acomoda dentro del contorno:
-/// una columna por piso (planta baja a la izquierda, planta alta a la derecha)
-/// y, en cada columna, los salones en el orden en que fueron registrados,
-/// de arriba hacia abajo.
 Map<String, _DistribucionEdificio> _distribuirSalones(List<Salon> salones, bool imagen) {
   final porEdificio = <String, List<Salon>>{};
   for (final s in salones) {
@@ -572,8 +570,6 @@ Map<String, _DistribucionEdificio> _distribuirSalones(List<Salon> salones, bool 
       }
     }
 
-    // Se dibujan los contornos distintos; los que caen dentro del principal
-    // (rectángulos de salones sueltos) se omiten para no duplicar.
     final rp = _envolvente(principal).inflate(2);
     final contornos = <List<Offset>>[principal];
     for (final pts in candidatos) {
@@ -594,8 +590,8 @@ Map<String, _DistribucionEdificio> _distribuirSalones(List<Salon> salones, bool 
   return out;
 }
 
+// Genera cuadrados exactos y uniformes para las cajitas de los salones
 List<_CajaSalon> _cajasDe(List<List<Salon>> columnas, List<Offset> contorno) {
-  // Eje largo del edificio = su lado más largo.
   var largoMax = 0.0;
   var eje = const Offset(0, -1);
   for (var i = 0; i < contorno.length; i++) {
@@ -605,7 +601,6 @@ List<_CajaSalon> _cajasDe(List<List<Salon>> columnas, List<Offset> contorno) {
       eje = d / d.distance;
     }
   }
-  // Vertical: apunta hacia arriba. Horizontal: apunta hacia la derecha.
   if (eje.dy.abs() >= eje.dx.abs()) {
     if (eje.dy > 0) eje = -eje;
   } else if (eje.dx < 0) {
@@ -627,35 +622,49 @@ List<_CajaSalon> _cajasDe(List<List<Salon>> columnas, List<Offset> contorno) {
   final ancho = vmax - vmin;
   if (largo <= 0 || ancho <= 0) return const <_CajaSalon>[];
 
-  final vertical = eje.dy.abs() >= eje.dx.abs();
   final colAncho = ancho / columnas.length;
   final cajas = <_CajaSalon>[];
+
+  // Un solo tamaño para TODAS las cajitas del edificio: el cuadrado más grande
+  // que quepa en la columna más apretada. Así todas se ven iguales y alineadas.
+  var a = colAncho * 0.40;
+  for (final col in columnas) {
+    if (col.isEmpty) continue;
+    a = math.min(a, (largo / col.length) * 0.40);
+  }
+  final r = a * 0.32; // radio de las esquinas redondeadas
 
   for (var k = 0; k < columnas.length; k++) {
     final delPiso = columnas[k];
     final m = delPiso.length;
     if (m == 0) continue;
     final slot = largo / m;
-    final mitadAncho = colAncho * 0.40;
-    final mitadLargo = math.min(slot * 0.40, mitadAncho * 1.4);
-    final r = math.min(mitadAncho, mitadLargo) * 0.30;
     final vc = vmin + colAncho * (k + 0.5);
 
     for (var i = 0; i < m; i++) {
       final uc = umax - slot * (i + 0.5);
       final c = eje * uc + cruz * vc;
       Offset q(double u, double v) => c + eje * u + cruz * v;
-      final a = mitadLargo;
-      final b = mitadAncho;
+
+      // Cuadrado con esquinas realmente redondeadas (4 tramos por esquina).
+      final forma = <Offset>[];
+      void esquina(double cu, double cv, double desde) {
+        for (var t = 0; t <= 6; t++) {
+          final ang = desde + t * (math.pi / 2) / 6;
+          forma.add(q(cu + r * math.cos(ang), cv + r * math.sin(ang)));
+        }
+      }
+      esquina(a - r, a - r, 0);
+      esquina(-(a - r), a - r, math.pi / 2);
+      esquina(-(a - r), -(a - r), math.pi);
+      esquina(a - r, -(a - r), 3 * math.pi / 2);
+
       cajas.add(_CajaSalon(
         delPiso[i],
-        [
-          q(-a + r, -b), q(a - r, -b), q(a, -b + r), q(a, b - r),
-          q(a - r, b), q(-a + r, b), q(-a, b - r), q(-a, -b + r),
-        ],
+        forma,
         c,
-        vertical ? mitadAncho * 2 : mitadLargo * 2,
-        vertical ? mitadLargo * 2 : mitadAncho * 2,
+        a * 2,
+        a * 2,
       ));
     }
   }
@@ -691,6 +700,9 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, WidgetsBindingObserver {
   static const String _claveHistorial = 'historial_busquedas';
+  static const String _claveSatelite = 'vista_satelite';
+  static const String _claveFavoritos = 'favoritos';
+  static const String _enlaceBase = 'https://orienta-tec-orizaba.web.app/';
   static const int _maxHistorial = 8;
 
   static const ColorFilter _filtroMapaOscuro = ColorFilter.matrix(<double>[
@@ -722,6 +734,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
   double _z0 = 17.5;
   double _z1 = 17.5;
   bool _mapaListo = false;
+  // Mientras la persona no mueva el mapa, se mantiene el encuadre de "Ver campus".
+  bool _interactuo = false;
   double _zoom = 17.5;
   bool _etiquetasVisibles = true;
 
@@ -735,8 +749,11 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
   List<String> _historial = <String>[];
 
   bool _verImagen = false;
-  // Satélite real de Esri (excluyente con la imagen ilustrada del campus).
   bool _satelite = false;
+  List<String> _favoritos = <String>[];
+  // Clave del salón del enlace compartido (?salon=...) que aún falta abrir.
+  String? _enlacePendiente;
+  StreamSubscription<Uri>? _subEnlaces;
   EdgeInsets _seguro = EdgeInsets.zero;
   final ValueNotifier<double> _extHoja = ValueNotifier<double>(0);
 
@@ -761,8 +778,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
 
   String? _edificioSeleccionado;
 
-  // Planta elegida en los chips (null = todas) y zoom aproximado (en medios
-  // niveles) para dibujar las cajitas de los salones.
   int? _piso;
   bool _cajasVisibles = false;
   int _pasoZoom = 35;
@@ -797,8 +812,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     return _verImagen ? s.centro : s.centroMapa;
   }
 
-  /// Zona a la que se dirige la ruta: la cajita del salón (no todo el bloque),
-  /// para que la ruta termine en el punto del camino más cercano a ese salón.
   Rect _destinoRuta(Salon s) {
     final d = _distribucion[s.bloque];
     if (d != null) {
@@ -845,6 +858,13 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     }
 
     _cargarHistorial();
+    _cargarVista();
+    _cargarFavoritos();
+    if (kIsWeb && !widget.admin) {
+      final c = Uri.base.queryParameters['salon'];
+      if (c != null && c.isNotEmpty) _enlacePendiente = c;
+    }
+    if (!kIsWeb && !widget.admin) _escucharEnlaces();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!widget.admin) _iniciarUbicacion();
       Future.delayed(const Duration(seconds: 2), () {
@@ -868,6 +888,14 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
       _datos = nuevos;
       _red = _Red(nuevos.caminos);
     });
+    if (_enlacePendiente != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _abrirDesdeEnlace());
+    }
+    if (!_interactuo && _salon == null && !_navegando) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !_interactuo) _verCampus();
+      });
+    }
     final actual = _salon;
     if (actual == null) return;
     final i = nuevos.salones.indexWhere((s) => s.clave == actual.clave);
@@ -913,6 +941,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     _editor.removeListener(_alCambiarEditor);
     _editor.dispose();
     _gpsSub?.cancel();
+    _subEnlaces?.cancel();
     _simTimer?.cancel();
     _camCtrl.dispose();
     _rotCtrl.dispose();
@@ -951,6 +980,172 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     }
     _rot0 = r;
     _rotCtrl.forward(from: 0);
+  }
+
+  /// Recuerda si la persona dejó activada la vista satélite.
+  Future<void> _cargarVista() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final sat = prefs.getBool(_claveSatelite) ?? false;
+      if (!mounted || sat == _satelite || (sat && _geo == null)) return;
+      setState(() {
+        _satelite = sat;
+        if (sat) _verImagen = false;
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _guardarVista() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_claveSatelite, _satelite);
+    } catch (_) {}
+  }
+
+  // ------------------------------------------------ favoritos y comunidad
+  Future<void> _cargarFavoritos() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final guardado = prefs.getStringList(_claveFavoritos) ?? const <String>[];
+      if (!mounted) return;
+      setState(() => _favoritos = List<String>.of(guardado));
+    } catch (_) {}
+  }
+
+  void _alternarFavorito(Salon s) {
+    final lista = List<String>.of(_favoritos);
+    if (!lista.remove(s.clave)) lista.insert(0, s.clave);
+    setState(() => _favoritos = lista);
+    () async {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setStringList(_claveFavoritos, lista);
+      } catch (_) {}
+    }();
+  }
+
+  String _enlaceDe(Salon s) => '$_enlaceBase?salon=${Uri.encodeQueryComponent(s.clave)}';
+
+  /// Código QR del salón: al escanearlo se abre este lugar en la app (o en la web).
+  void _mostrarQr(Salon s) {
+    final p = Paleta.of(context);
+    final enlace = _enlaceDe(s);
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(s.nombre.replaceAll('Salón Salón', 'Salón'), maxLines: 2, overflow: TextOverflow.ellipsis),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)),
+              child: SizedBox(
+                width: 220,
+                height: 220,
+                child: QrImageView(
+                  data: enlace,
+                  size: 220,
+                  backgroundColor: Colors.white,
+                  errorCorrectionLevel: QrErrorCorrectLevel.M,
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Escanéalo para abrir este lugar en Orienta-Tec.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 13, color: p.textoSec),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton.icon(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _compartir(s);
+            },
+            icon: const Icon(Icons.link, size: 18),
+            label: const Text('Copiar enlace'),
+          ),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cerrar')),
+        ],
+      ),
+    );
+  }
+
+  /// Android: abre el salón cuando se toca un enlace de la app (en frío o con
+  /// la app ya abierta).
+  Future<void> _escucharEnlaces() async {
+    try {
+      final enlaces = AppLinks();
+      final inicial = await enlaces.getInitialLink();
+      if (inicial != null) _recibirEnlace(inicial);
+      _subEnlaces = enlaces.uriLinkStream.listen(_recibirEnlace);
+    } catch (_) {}
+  }
+
+  void _recibirEnlace(Uri uri) {
+    final clave = uri.queryParameters['salon'];
+    if (clave == null || clave.isEmpty) return;
+    _enlacePendiente = clave;
+    _abrirDesdeEnlace();
+  }
+
+  /// Si el texto es un enlace compartido (?salon=...), devuelve la clave.
+  String? _claveDeTexto(String texto) {
+    final t = texto.trim();
+    if (!t.contains('salon=')) return null;
+    final c = Uri.tryParse(t)?.queryParameters['salon'];
+    return (c == null || c.isEmpty) ? null : c;
+  }
+
+  Future<void> _compartir(Salon s) async {
+    await Clipboard.setData(ClipboardData(text: _enlaceDe(s)));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Enlace copiado. Quien lo abra en el navegador verá este lugar.')),
+    );
+  }
+
+  Salon? _salonDeClave(String clave) {
+    for (final s in _salones) {
+      if (s.clave == clave) return s;
+    }
+    // Tolera diferencias de mayúsculas o acentos.
+    final n = sinAcentos(clave).trim();
+    for (final s in _salones) {
+      if (sinAcentos(s.clave).trim() == n) return s;
+    }
+    return null;
+  }
+
+  /// En la versión web: abre el salón del enlace (?salon=...). Se reintenta
+  /// hasta que el salón exista (los datos del servidor pueden llegar después).
+  void _abrirDesdeEnlace() {
+    final clave = _enlacePendiente;
+    if (clave == null || !_mapaListo || !mounted) return;
+    final s = _salonDeClave(clave);
+    if (s == null) return;
+    _enlacePendiente = null;
+    _seleccionar(s);
+  }
+
+  Future<void> _reportar(Salon? s) async {
+    final texto = await showDialog<String>(
+      context: context,
+      builder: (_) => _DialogoComentario(
+        titulo: s == null ? 'Comentarios sobre la app' : 'Reportar sobre ${s.nombre.replaceAll('Salón Salón', 'Salón')}',
+      ),
+    );
+    if (texto == null || texto.trim().isEmpty || !mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await ServicioComunidad.enviarComentario(texto: texto, salon: s?.nombre ?? '');
+      messenger.showSnackBar(const SnackBar(content: Text('¡Gracias! Recibimos tu comentario.')));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('No se pudo enviar: $e')));
+    }
   }
 
   Future<void> _cargarHistorial() async {
@@ -1072,7 +1267,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
   void _verCampus() {
     final geo = _geo;
     if (geo == null) {
-      _irA(_centroCampus, 17.5);
+      _irA(_centroCampus, 16.5);
       return;
     }
     final pts = <LatLng>[];
@@ -1081,7 +1276,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
         pts.add(geo.aLatLng(p));
       }
     }
-    _ajustarA(pts, maxZoom: _satelite ? 17.5 : 18);
+    // Limitamos maxZoom a 17.2 garantizando que la app inicie con el mapa limpio
+    _ajustarA(pts, maxZoom: 17.2);
   }
 
   void _enfocarRuta() {
@@ -1202,7 +1398,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     _detenerSimulacion();
     setState(() {
       _salon = s;
-      _ruta = _construirRuta(pts, s, _mpp);
+      _ruta = _construirRuta(pts, s, _mpp, escalera: _escaleraDe(s));
       _navegando = false;
       _llegada = false;
       _paso = 0;
@@ -1212,6 +1408,25 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
       _extHoja.value = 0;
     });
     WidgetsBinding.instance.addPostFrameCallback((_) => _enfocarRuta());
+    ServicioComunidad.contarConsulta(s.clave, s.nombre);
+  }
+
+  /// Quita el salón y la ruta seleccionados sin mover la cámara (se usa al
+  /// tocar otro bloque en el mapa).
+  void _soltarSeleccion() {
+    _detenerSimulacion();
+    setState(() {
+      _salon = null;
+      _ruta = null;
+      _navegando = false;
+      _llegada = false;
+      _paso = 0;
+      _avancePx = 0;
+      _posUsuario = null;
+      _aviso = null;
+      _edificioSeleccionado = null;
+    });
+    _busqueda.clear();
   }
 
   void _limpiar() {
@@ -1241,7 +1456,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
       );
       return;
     }
-    final r = _construirRuta(pts, s, _mpp);
+    final r = _construirRuta(pts, s, _mpp, escalera: _escaleraDe(s));
     final trivial = r.puntos.length < 2;
     setState(() {
       _ruta = r;
@@ -1354,10 +1569,30 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     final pts = _red.ruta(desde, _destinoRuta(s));
     if (pts == null) return;
     setState(() {
-      _ruta = _construirRuta(pts, s, _mpp);
+      _ruta = _construirRuta(pts, s, _mpp, escalera: _escaleraDe(s));
       _paso = 0;
       _avancePx = 0;
     });
+  }
+
+  /// Escaleras del mismo edificio más cercanas al salón (solo si está arriba).
+  /// null = no hace falta subir; '' = hay que subir pero no hay escaleras
+  /// registradas en el edificio.
+  String? _escaleraDe(Salon s) {
+    if (s.pin || s.piso <= 1) return null;
+    Salon? mejor;
+    var dMin = double.infinity;
+    for (final e in _salones) {
+      if (e.pin || e.bloque != s.bloque || identical(e, s)) continue;
+      final t = sinAcentos('${e.tipo} ${e.numero}');
+      if (!t.contains('escalera')) continue;
+      final d = (e.centro - s.centro).distance;
+      if (d < dMin) {
+        dMin = d;
+        mejor = e;
+      }
+    }
+    return mejor == null ? '' : mejor.nombre;
   }
 
   List<Salon> _obtenerSalonesPorEdificio(String edificio) {
@@ -1374,32 +1609,37 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
           _salon?.bloque == nombre ||
           (widget.admin && nombre == _editor.bloqueSel);
 
-      // Edificio: azul claro con borde azul marino cuando se ven las cajitas.
+      const Color tinte = Color(0xFF4A5F8A);
       final Color relleno = _cajasVisibles
-          ? const Color(0xFF8FB0F5).withValues(alpha: sat ? 0.45 : 0.80)
-          : (sat ? Colors.white.withValues(alpha: 0.05) : p.mapa.withValues(alpha: p.oscuro ? 0.28 : 0.20));
+          ? (sat ? Colors.white.withValues(alpha: 0.30) : const Color(0xFFDCE4F2).withValues(alpha: 0.88))
+          : (sat ? Colors.white.withValues(alpha: 0.10) : tinte.withValues(alpha: p.oscuro ? 0.34 : 0.20));
       final Color borde = elegido
           ? (p.oscuro ? _cian : _cianOscuro)
-          : (_cajasVisibles ? _casing : (sat ? Colors.white : p.mapa));
+          : (_cajasVisibles
+              ? (sat ? Colors.white : const Color(0xFF5A6E96))
+              : (sat ? Colors.white.withValues(alpha: 0.85) : tinte.withValues(alpha: 0.75)));
+      
       for (final contorno in d.contornos) {
         out.add(Polygon(
           points: contorno.map(geo.aLatLng).toList(),
           color: relleno,
           borderColor: borde,
-          borderStrokeWidth: elegido ? 3 : 1.5,
+          borderStrokeWidth: elegido ? 3 : (_cajasVisibles ? 1.4 : 1.1),
         ));
       }
 
       if (!_cajasVisibles) return;
+      
       for (final c in d.cajas) {
         if (_piso != null && c.salon.piso != _piso) continue;
         final activo = _esActivo(c.salon);
         if (_ruta != null && !activo) continue;
         out.add(Polygon(
           points: c.esquinas.map(geo.aLatLng).toList(),
-          color: activo ? _rosa.withValues(alpha: 0.92) : const Color(0xFFB9CCFA).withValues(alpha: 0.92),
-          borderColor: activo ? Colors.white : _casing,
-          borderStrokeWidth: activo ? 3 : 1.6,
+          // Se aplica fondo blanco fuerte y limpio a las cajas
+          color: activo ? _rosa.withValues(alpha: 0.95) : const Color(0xFFFFFFFF).withValues(alpha: 0.90),
+          borderColor: activo ? Colors.white : const Color(0xFF8899B6),
+          borderStrokeWidth: activo ? 3 : 1.5,
         ));
       }
     });
@@ -1448,7 +1688,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     return out;
   }
 
-  // Renderiza los salones como cuadros/rectángulos individuales sobre cada edificio
   List<Marker> _marcadores() {
     final geo = _geo;
     final out = <Marker>[];
@@ -1456,30 +1695,56 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
     if (geo != null) {
       final dist = _distribucion;
 
-      // Con el mapa alejado: una etiqueta corta por edificio ("1", "E").
-      if (_etiquetasVisibles && !_cajasVisibles && _ruta == null) {
+      if (_etiquetasVisibles && !_cajasVisibles && _ruta == null && _pasoZoom / 2.0 >= _zoomEtiquetasEdificios) {
+        final metrosPx =
+            156543.03392 * math.cos(_centroCampus.latitude * math.pi / 180) / math.pow(2, _pasoZoom / 2.0);
+        final kk = _mpp / metrosPx;
+        final ang = _rotacion.value * math.pi / 180;
+        final cs = math.cos(ang), sn = math.sin(ang);
+        Offset pant(Offset q) {
+          final x = q.dx * kk, y = q.dy * kk;
+          return Offset(x * cs - y * sn, x * sn + y * cs);
+        }
+
+        final ocupados = <Rect>[];
+        for (final pin in _datos.pines) {
+          ocupados.add(Rect.fromCenter(center: pant(pin.centro), width: 40, height: 44));
+        }
+        final cand = <MapEntry<String, double>>[];
         dist.forEach((nombre, d) {
           if (_edificioSeleccionado == nombre) return;
+          final r = _envolvente(d.principal);
+          cand.add(MapEntry(nombre, r.width * r.height));
+        });
+        cand.sort((a, b) => b.value.compareTo(a.value));
+        for (final e in cand) {
+          final d = dist[e.key]!;
+          var texto = _etiquetaCorta(d.nombre);
+          if (texto.length > 16) texto = '${texto.substring(0, 15)}…';
+          final w = texto.length * 6.6 + 20;
           final c = _envolvente(d.principal).center;
+          final caja = Rect.fromCenter(center: pant(c), width: w, height: 24).inflate(3);
+          if (ocupados.any((o) => o.overlaps(caja))) continue;
+          ocupados.add(caja);
+          final nombre = e.key;
           out.add(Marker(
             point: geo.aLatLng(c),
-            width: 80,
-            height: 30,
+            width: w + 4,
+            height: 28,
             child: IgnorePointer(
               ignoring: widget.admin,
               child: Center(
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTap: () => setState(() => _edificioSeleccionado = nombre),
-                  child: _EtiquetaEdificio(nombre: _etiquetaCorta(d.nombre), activa: false),
+                  child: _EtiquetaEdificio(nombre: texto, activa: false),
                 ),
               ),
             ),
           ));
-        });
+        }
       }
 
-      // Con zoom cerca: el número de cada salón sobre su cajita.
       if (_cajasVisibles) {
         final metrosPorPxPantalla =
             156543.03392 * math.cos(_centroCampus.latitude * math.pi / 180) / math.pow(2, _pasoZoom / 2.0);
@@ -1501,7 +1766,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTap: () => _seleccionar(c.salon),
-                  child: _TextoCaja(texto: c.salon.numero, activo: activo),
+                  child: _TextoCaja(texto: c.salon.numero, activo: activo, icono: iconoEnMapa(c.salon)),
                 ),
               ),
             ));
@@ -1509,11 +1774,12 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
         });
       }
 
-      // Pines (entradas, canchas, estacionamientos…): solo marcador, sin bloque.
       for (final pin in _datos.pines) {
         final activo = _esActivo(pin);
         if (_ruta != null && !activo) continue;
         final col = _colorPin(pin.tipo);
+        final bool verPinLabels = _etiquetasVisibles && _pasoZoom / 2.0 >= _zoomEtiquetas;
+        
         out.add(Marker(
           point: geo.aLatLng(pin.centro),
           width: 110,
@@ -1528,30 +1794,31 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Container(
-                    width: 32,
-                    height: 32,
+                    width: verPinLabels ? 32 : 26,
+                    height: verPinLabels ? 32 : 26,
                     decoration: BoxDecoration(
                       color: activo ? _rosa : col,
                       shape: BoxShape.circle,
-                      border: Border.all(color: Colors.white, width: 2.5),
+                      border: Border.all(color: Colors.white, width: 2),
                       boxShadow: const [BoxShadow(color: Colors.black38, blurRadius: 4, offset: Offset(0, 1))],
                     ),
-                    child: Icon(_iconoPin(pin.tipo), color: Colors.white, size: 18),
+                    child: _IconoPin(tipo: pin.tipo, color: Colors.white, tam: verPinLabels ? 18 : 15, fondo: activo ? _rosa : col),
                   ),
-                  if (_etiquetasVisibles)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 2),
+                  if (verPinLabels)
+                    Container(
+                      margin: const EdgeInsets.only(top: 3),
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.94),
+                        borderRadius: BorderRadius.circular(5),
+                        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 3, offset: Offset(0, 1))],
+                      ),
                       child: Text(
                         pin.numero,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          color: Colors.white,
-                          shadows: [Shadow(color: Colors.black, blurRadius: 3), Shadow(color: Colors.black, blurRadius: 6)],
-                        ),
+                        style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, color: Color(0xFF1B2A41)),
                       ),
                     ),
                 ],
@@ -1614,7 +1881,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
                   mapController: _mapa,
                   options: MapOptions(
                     initialCenter: _centroCampus,
-                    initialZoom: 17.5,
+                    initialZoom: 16.5,
                     minZoom: 14.5,
                     maxZoom: 22,
                     cameraConstraint: CameraConstraint.containCenter(bounds: _limitesCamara),
@@ -1624,6 +1891,16 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
                       WidgetsBinding.instance.addPostFrameCallback((_) {
                         _verCampus();
                       });
+                      // Se repite cuando la pantalla ya tomó su tamaño final y
+                      // llegaron los datos del mapa, mientras nadie lo mueva.
+                      for (final ms in const [600, 1500, 3000, 6000, 10000]) {
+                        Future.delayed(Duration(milliseconds: ms), _abrirDesdeEnlace);
+                      }
+                      for (final ms in const [400, 1200, 2500]) {
+                        Future.delayed(Duration(milliseconds: ms), () {
+                          if (mounted && !_interactuo && _salon == null && !_navegando) _verCampus();
+                        });
+                      }
                     },
                     onTap: (_, punto) {
                       final g = _geo;
@@ -1638,6 +1915,9 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
                       if (s != null && s.pin) {
                         _seleccionar(s);
                       } else if (s != null) {
+                        // Con un salón seleccionado (antes de iniciar el recorrido)
+                        // se suelta ese salón y se abre el bloque que tocaste.
+                        if (_salon != null && !_navegando) _soltarSeleccion();
                         setState(() {
                           _edificioSeleccionado = s.bloque;
                         });
@@ -1649,6 +1929,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
                     },
                     onPositionChanged: (camara, hayGesto) {
                       _zoom = camara.zoom;
+                      if (hayGesto) _interactuo = true;
                       if ((camara.rotation - _rotacion.value).abs() > 0.1) {
                         _rotacion.value = camara.rotation;
                       }
@@ -1661,7 +1942,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
                       final paso = (camara.zoom * 2).floor();
                       if (visibles != _etiquetasVisibles ||
                           cajas != _cajasVisibles ||
-                          (cajas && paso != _pasoZoom)) {
+                          (visibles && paso != _pasoZoom)) {
                         setState(() {
                           _etiquetasVisibles = visibles;
                           _cajasVisibles = cajas;
@@ -1684,7 +1965,9 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
                           ),
                         ],
                       ),
-                    if (geo != null) PolygonLayer(polygons: _poligonos(geo)),
+                    // simplificationTolerance: 0 evita que flutter_map "simplifique" los polígonos
+                    // al alejar el zoom (convertía las esquinas redondeadas en cortes rectos).
+                    if (geo != null) PolygonLayer(polygons: _poligonos(geo), simplificationTolerance: 0),
                     if (geo != null && _ruta != null) PolylineLayer(polylines: _lineas(geo)),
                     MarkerLayer(rotate: true, markers: _marcadores()),
                     if (widget.admin && geo != null) ..._editor.capas(aLatLng: geo.aLatLng, imagen: _verImagen),
@@ -1702,7 +1985,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
 
   Widget _capaTiles(Paleta p) {
     if (_satelite && _claveSatMapTiler != '') {
-      // Imagen tipo Google (Maxar/Airbus) con tu llave de MapTiler.
       return TileLayer(
         urlTemplate: _urlTilesSateliteMapTiler,
         userAgentPackageName: _paqueteApp,
@@ -1723,8 +2005,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
         userAgentPackageName: _paqueteApp,
         maxNativeZoom: _zoomMaxSatelite.toInt(),
         maxZoom: 22,
-        // Sin fundido entre niveles (evita que se vea borroso mientras carga)
-        // y con mosaicos extra alrededor para que cargue antes de moverte.
         tileDisplay: const TileDisplay.instantaneous(),
         keepBuffer: 3,
         panBuffer: 2,
@@ -1811,18 +2091,14 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
             icono: _satelite ? Icons.map_outlined : Icons.satellite_alt_outlined,
             tooltip: _satelite ? 'Vista de mapa' : 'Vista satélite',
             destacado: _satelite,
-            onPressed: () => setState(() {
-              _satelite = !_satelite;
-              if (_satelite) {
-                _verImagen = false;
-                // Al abrir el satélite se muestra todo el campus para que no
-                // queden salones fuera de la pantalla (solo si no hay ruta
-                // ni un salón seleccionado).
-                if (!_navegando && _salon == null) {
-                  WidgetsBinding.instance.addPostFrameCallback((_) => _verCampus());
-                }
-              }
-            }),
+            // Al cambiar de vista el mapa se queda en el mismo punto y zoom.
+            onPressed: () {
+              setState(() {
+                _satelite = !_satelite;
+                if (_satelite) _verImagen = false;
+              });
+              _guardarVista();
+            },
           ),
           const SizedBox(height: 8),
         ],
@@ -1987,11 +2263,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
             width: 52,
             height: 52,
             alignment: Alignment.center,
-            decoration: BoxDecoration(color: p.primario, borderRadius: BorderRadius.circular(16)),
-            child: Text(
-              s.numero,
-              style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700),
-            ),
+            decoration: BoxDecoration(color: s.pin ? _colorPin(s.tipo) : p.primario, borderRadius: BorderRadius.circular(16)),
+            child: _MiniaturaSalon(salon: s, tam: 52),
           ),
           const SizedBox(width: 14),
           Expanded(
@@ -2008,7 +2281,43 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
               ],
             ),
           ),
-          IconButton(onPressed: _limpiar, tooltip: 'Quitar destino', icon: const Icon(Icons.close)),
+          IconButton(
+            onPressed: () => _alternarFavorito(s),
+            tooltip: _favoritos.contains(s.clave) ? 'Quitar de favoritos' : 'Agregar a favoritos',
+            visualDensity: VisualDensity.compact,
+            icon: Icon(
+              _favoritos.contains(s.clave) ? Icons.star_rounded : Icons.star_outline_rounded,
+              color: _favoritos.contains(s.clave) ? Colors.amber.shade700 : null,
+            ),
+          ),
+          PopupMenuButton<String>(
+            tooltip: 'Más opciones',
+            padding: EdgeInsets.zero,
+            onSelected: (v) {
+              if (v == 'enlace') {
+                _compartir(s);
+              } else if (v == 'qr') {
+                _mostrarQr(s);
+              } else {
+                _reportar(s);
+              }
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(
+                value: 'qr',
+                child: Row(children: [Icon(Icons.qr_code_2, size: 20), SizedBox(width: 12), Text('Código QR')]),
+              ),
+              PopupMenuItem(
+                value: 'enlace',
+                child: Row(children: [Icon(Icons.link, size: 20), SizedBox(width: 12), Text('Copiar enlace')]),
+              ),
+              PopupMenuItem(
+                value: 'reportar',
+                child: Row(children: [Icon(Icons.flag_outlined, size: 20), SizedBox(width: 12), Text('Reportar un problema')]),
+              ),
+            ],
+          ),
+          IconButton(onPressed: _limpiar, tooltip: 'Quitar destino', visualDensity: VisualDensity.compact, icon: const Icon(Icons.close)),
         ],
       ),
       const SizedBox(height: 14),
@@ -2088,6 +2397,25 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
       barElevation: const WidgetStatePropertyAll(6),
       viewBackgroundColor: p.superficie,
       suggestionsBuilder: (context, controller) {
+        // Si pegan un enlace compartido (por ejemplo en iPhone), se ofrece abrirlo.
+        final pegado = _claveDeTexto(controller.text);
+        if (pegado != null) {
+          final destino = _salonDeClave(pegado);
+          if (destino != null) {
+            return [
+              ListTile(
+                leading: const Icon(Icons.link),
+                title: Text('Abrir ${destino.nombre.replaceAll('Salón Salón', 'Salón')}'),
+                subtitle: const Text('Del enlace que pegaste'),
+                onTap: () {
+                  controller.closeView('');
+                  _registrarBusqueda(destino);
+                  _seleccionar(destino);
+                },
+              ),
+            ];
+          }
+        }
         final q = controller.text.trim().toLowerCase();
         var lista = _salones.where((s) {
           return q.isEmpty || s.numero.contains(q) || s.nombre.toLowerCase().contains(q) || s.edificio.toLowerCase().contains(q) || (s.pin && s.tipo.toLowerCase().contains(q));
@@ -2107,60 +2435,70 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
             ),
           ];
         }
-        final tiles = lista.map(
-          (s) => ListTile(
-            leading: Container(
-              width: 44,
-              height: 44,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(color: s.pin ? _colorPin(s.tipo) : p.primario, borderRadius: BorderRadius.circular(12)),
-              child: s.pin
-                  ? Icon(_iconoPin(s.tipo), color: Colors.white, size: 24)
-                  : Text(s.numero, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
-            ),
-            title: Text(s.nombre.replaceAll('Salón Salón', 'Salón')),
-            subtitle: Text(s.ubicacion),
-            trailing: (q.isEmpty && _historial.contains(s.clave))
-                ? Icon(Icons.history, size: 20, color: p.textoSec)
-                : null,
-            onTap: () {
-              controller.closeView('');
-              _registrarBusqueda(s);
-              _seleccionar(s);
-            },
-          ),
-        ).toList();
-        if (q.isEmpty && _historial.isNotEmpty) {
-          return [
-            Padding(
+        Widget tile(Salon s) => ListTile(
+              leading: Container(
+                width: 44,
+                height: 44,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(color: s.pin ? _colorPin(s.tipo) : p.primario, borderRadius: BorderRadius.circular(12)),
+                child: _MiniaturaSalon(salon: s, tam: 44),
+              ),
+              title: Text(s.nombre.replaceAll('Salón Salón', 'Salón')),
+              subtitle: Text(s.ubicacion),
+              trailing: _favoritos.contains(s.clave)
+                  ? Icon(Icons.star_rounded, size: 22, color: Colors.amber.shade700)
+                  : ((q.isEmpty && _historial.contains(s.clave)) ? Icon(Icons.history, size: 20, color: p.textoSec) : null),
+              onTap: () {
+                controller.closeView('');
+                _registrarBusqueda(s);
+                _seleccionar(s);
+              },
+            );
+        Widget encabezado(IconData icono, String titulo, {Widget? accion}) => Padding(
               padding: const EdgeInsets.fromLTRB(16, 4, 8, 0),
               child: Row(
                 children: [
-                  Icon(Icons.history, size: 18, color: p.textoSec),
+                  Icon(icono, size: 18, color: p.textoSec),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: Text(
-                      'Búsquedas recientes',
-                      style: TextStyle(fontWeight: FontWeight.w700, color: p.textoSec),
-                    ),
+                    child: Text(titulo, style: TextStyle(fontWeight: FontWeight.w700, color: p.textoSec)),
                   ),
-                  TextButton.icon(
-                    onPressed: () {
-                      _borrarHistorial();
-                      // Fuerza a la lista a reconstruirse sin los recientes.
-                      controller.text = ' ';
-                      controller.text = '';
-                    },
-                    icon: const Icon(Icons.delete_sweep_outlined, size: 18),
-                    label: const Text('Borrar historial'),
-                  ),
+                  if (accion != null) accion,
                 ],
               ),
-            ),
-            ...tiles,
+            );
+        if (q.isEmpty && (_historial.isNotEmpty || _favoritos.isNotEmpty)) {
+          final favs = [for (final c in _favoritos) ...lista.where((s) => s.clave == c)];
+          final recientes = [
+            for (final c in _historial)
+              if (!_favoritos.contains(c)) ...lista.where((s) => s.clave == c),
+          ];
+          final resto = lista.where((s) => !_favoritos.contains(s.clave) && !_historial.contains(s.clave));
+          return [
+            if (favs.isNotEmpty) ...[
+              encabezado(Icons.star_outline_rounded, 'Favoritos'),
+              ...favs.map(tile),
+            ],
+            if (recientes.isNotEmpty) ...[
+              encabezado(
+                Icons.history,
+                'Búsquedas recientes',
+                accion: TextButton.icon(
+                  onPressed: () {
+                    _borrarHistorial();
+                    controller.text = ' ';
+                    controller.text = '';
+                  },
+                  icon: const Icon(Icons.delete_sweep_outlined, size: 18),
+                  label: const Text('Borrar historial'),
+                ),
+              ),
+              ...recientes.map(tile),
+            ],
+            ...resto.map(tile),
           ];
         }
-        return tiles;
+        return lista.map(tile).toList();
       },
     );
   }
@@ -2342,6 +2680,25 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
             ),
           ],
         ),
+        if (_datos.aviso.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+            decoration: BoxDecoration(
+              color: Colors.amber.withValues(alpha: p.oscuro ? 0.16 : 0.22),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.campaign_outlined, size: 20, color: Colors.amber.shade800),
+                const SizedBox(width: 10),
+                Expanded(child: Text(_datos.aviso, style: TextStyle(fontSize: 13.5, height: 1.3, color: p.texto))),
+              ],
+            ),
+          ),
+        ],
         const SizedBox(height: 12),
         Row(
           children: [
@@ -2350,6 +2707,16 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
             Expanded(child: Text(e.texto, style: TextStyle(fontSize: 13, color: e.color))),
           ],
         ),
+        if (!widget.admin)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: () => _reportar(null),
+              style: TextButton.styleFrom(padding: EdgeInsets.zero, visualDensity: VisualDensity.compact),
+              icon: const Icon(Icons.chat_bubble_outline, size: 16),
+              label: const Text('Enviar comentarios'),
+            ),
+          ),
       ],
     );
   }
@@ -2422,15 +2789,10 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin, 
                     height: 38,
                     alignment: Alignment.center,
                     decoration: BoxDecoration(
-                      color: p.primario,
+                      color: s.pin ? _colorPin(s.tipo) : p.primario,
                       borderRadius: BorderRadius.circular(10),
                     ),
-                    child: s.sinPrefijo
-                        ? const Icon(Icons.place, color: Colors.white, size: 20)
-                        : Text(
-                            s.numero,
-                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
-                          ),
+                    child: _MiniaturaSalon(salon: s, tam: 38),
                   ),
                   title: Text(
                     s.nombre.replaceAll('Salón Salón', 'Salón'),
@@ -2572,29 +2934,258 @@ class _TituloSeccion extends StatelessWidget {
 }
 
 class _TextoCaja extends StatelessWidget {
-  const _TextoCaja({required this.texto, required this.activo});
+  const _TextoCaja({required this.texto, required this.activo, this.icono});
   final String texto;
   final bool activo;
 
+  /// Ícono del salón (oficina, baños, laboratorio…). null = solo el número.
+  final IconData? icono;
+
   @override
   Widget build(BuildContext context) {
+    final color = activo ? Colors.white : const Color(0xFF1B396A);
+    final icono = this.icono;
     return Center(
       child: FittedBox(
         fit: BoxFit.scaleDown,
         child: Padding(
-          padding: const EdgeInsets.all(2),
-          child: Text(
-            _partirEtiqueta(texto),
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              fontSize: 13,
-              height: 1.05,
-              fontWeight: FontWeight.w600,
-              color: activo ? Colors.white : const Color(0xFF0B1B3A),
-            ),
-          ),
+          padding: const EdgeInsets.all(3),
+          child: icono == null
+              ? Text(
+                  _partirEtiqueta(texto),
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 14, height: 1.05, fontWeight: FontWeight.w700, color: color),
+                )
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [Icon(icono, size: 24, color: color)],
+                ),
         ),
       ),
+    );
+  }
+}
+
+/// Ícono de un pin. "Punto de reunión" y "Área verde" llevan un dibujo propio;
+/// los demás tipos usan un ícono normal.
+class _IconoPin extends StatelessWidget {
+  const _IconoPin({required this.tipo, required this.tam, this.color = Colors.white, this.fondo});
+  final String tipo;
+  final double tam;
+  final Color color;
+
+  /// Color del círculo donde se dibuja (para los "huecos" del dibujo).
+  final Color? fondo;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = sinAcentos(tipo);
+    if (_esReunion(t)) {
+      return SizedBox(width: tam, height: tam, child: CustomPaint(painter: _PintorReunion(color)));
+    }
+    if (_esCajero(t)) {
+      return SizedBox(
+        width: tam,
+        height: tam,
+        child: CustomPaint(painter: _PintorCajero(color, fondo ?? _colorPin(tipo))),
+      );
+    }
+    if (_esAreaVerde(t)) {
+      return SizedBox(
+        width: tam,
+        height: tam,
+        child: CustomPaint(painter: _PintorAreaVerde(color, fondo ?? _colorPin(tipo))),
+      );
+    }
+    return Icon(_iconoPin(tipo), color: color, size: tam);
+  }
+}
+
+/// Cajero automático: cuerpo con pantalla, teclado y ranura (dibujo propio).
+class _PintorCajero extends CustomPainter {
+  const _PintorCajero(this.color, this.fondo);
+  final Color color;
+  final Color fondo;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final s = size.width;
+    final lleno = Paint()..color = color..style = PaintingStyle.fill..isAntiAlias = true;
+    final hueco = Paint()..color = fondo..style = PaintingStyle.fill..isAntiAlias = true;
+    // Cuerpo.
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(Rect.fromLTRB(s * 0.20, s * 0.06, s * 0.80, s * 0.94), Radius.circular(s * 0.10)),
+      lleno,
+    );
+    // Pantalla ("ATM").
+    final pantalla = RRect.fromRectAndRadius(Rect.fromLTRB(s * 0.28, s * 0.14, s * 0.72, s * 0.33), Radius.circular(s * 0.05));
+    canvas.drawRRect(pantalla, hueco);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(Rect.fromLTRB(s * 0.34, s * 0.21, s * 0.66, s * 0.26), Radius.circular(s * 0.025)),
+      lleno,
+    );
+    // Teclado 3 x 3.
+    for (var f = 0; f < 3; f++) {
+      for (var c = 0; c < 3; c++) {
+        final x = s * (0.28 + c * 0.095);
+        final y = s * (0.42 + f * 0.095);
+        canvas.drawRect(Rect.fromLTWH(x, y, s * 0.07, s * 0.07), hueco);
+      }
+    }
+    // Ranura de la tarjeta.
+    canvas.drawRect(Rect.fromLTRB(s * 0.60, s * 0.42, s * 0.72, s * 0.46), hueco);
+    canvas.drawRect(Rect.fromLTRB(s * 0.62, s * 0.46, s * 0.70, s * 0.62), hueco);
+  }
+
+  @override
+  bool shouldRepaint(_PintorCajero v) => v.color != color || v.fondo != fondo;
+}
+
+/// Señal de punto de reunión: cuatro flechas que apuntan a un círculo central.
+class _PintorReunion extends CustomPainter {
+  const _PintorReunion(this.color);
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final s = size.width;
+    final pincel = Paint()..color = color..style = PaintingStyle.fill..isAntiAlias = true;
+    canvas.translate(s / 2, s / 2);
+    canvas.drawCircle(Offset.zero, s * 0.10, pincel);
+    final flecha = Path()
+      ..addRect(Rect.fromLTRB(-s * 0.055, -s * 0.46, s * 0.055, -s * 0.30))
+      ..moveTo(-s * 0.15, -s * 0.30)
+      ..lineTo(s * 0.15, -s * 0.30)
+      ..lineTo(0, -s * 0.17)
+      ..close();
+    for (var i = 0; i < 4; i++) {
+      canvas.drawPath(flecha, pincel);
+      canvas.rotate(math.pi / 2);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_PintorReunion v) => v.color != color;
+}
+
+/// Área verde: un globo con un brote de dos hojas (dibujo propio).
+class _PintorAreaVerde extends CustomPainter {
+  const _PintorAreaVerde(this.color, this.fondo);
+  final Color color;
+  final Color fondo;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final s = size.width;
+    final lleno = Paint()..color = color..style = PaintingStyle.fill..isAntiAlias = true;
+    final hueco = Paint()..color = fondo..style = PaintingStyle.fill..isAntiAlias = true;
+    final centro = Offset(s * 0.5, s * 0.63);
+    final radio = s * 0.33;
+    canvas.drawCircle(centro, radio, lleno);
+    // "Continentes" (huecos del color del círculo).
+    canvas.drawPath(
+      Path()
+        ..moveTo(s * 0.30, s * 0.58)
+        ..quadraticBezierTo(s * 0.36, s * 0.46, s * 0.46, s * 0.55)
+        ..quadraticBezierTo(s * 0.46, s * 0.66, s * 0.38, s * 0.72)
+        ..quadraticBezierTo(s * 0.28, s * 0.70, s * 0.30, s * 0.58)
+        ..close(),
+      hueco,
+    );
+    canvas.drawPath(
+      Path()
+        ..moveTo(s * 0.58, s * 0.66)
+        ..quadraticBezierTo(s * 0.68, s * 0.58, s * 0.76, s * 0.66)
+        ..quadraticBezierTo(s * 0.74, s * 0.78, s * 0.64, s * 0.82)
+        ..quadraticBezierTo(s * 0.55, s * 0.76, s * 0.58, s * 0.66)
+        ..close(),
+      hueco,
+    );
+    // Tallo y dos hojas.
+    final tallo = Paint()..color = color..style = PaintingStyle.stroke..strokeWidth = s * 0.05..strokeCap = StrokeCap.round;
+    canvas.drawLine(Offset(s * 0.5, s * 0.31), Offset(s * 0.5, s * 0.18), tallo);
+    canvas.drawPath(
+      Path()
+        ..moveTo(s * 0.5, s * 0.20)
+        ..quadraticBezierTo(s * 0.36, s * 0.02, s * 0.14, s * 0.10)
+        ..quadraticBezierTo(s * 0.20, s * 0.30, s * 0.5, s * 0.20)
+        ..close(),
+      lleno,
+    );
+    canvas.drawPath(
+      Path()
+        ..moveTo(s * 0.5, s * 0.20)
+        ..quadraticBezierTo(s * 0.64, s * 0.02, s * 0.86, s * 0.10)
+        ..quadraticBezierTo(s * 0.80, s * 0.30, s * 0.5, s * 0.20)
+        ..close(),
+      lleno,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_PintorAreaVerde v) => v.color != color || v.fondo != fondo;
+}
+
+/// Miniatura cuadrada de un salón (listas, buscador y ficha): siempre un
+/// ícono (oficina, baños, laboratorio, aula…). El número ya va en el título.
+/// Solo si el administrador eligió "Sin ícono" se muestra el texto.
+class _MiniaturaSalon extends StatelessWidget {
+  const _MiniaturaSalon({required this.salon, required this.tam});
+  final Salon salon;
+  final double tam;
+
+  @override
+  Widget build(BuildContext context) {
+    final s = salon;
+    if (s.pin) return _IconoPin(tipo: s.tipo, color: Colors.white, tam: tam * 0.55, fondo: _colorPin(s.tipo));
+    final icono = iconoDeSalon(s);
+    if (icono != null) return Icon(icono, color: Colors.white, size: tam * 0.55);
+    return Padding(
+      padding: EdgeInsets.all(tam * 0.1),
+      child: FittedBox(
+        fit: BoxFit.scaleDown,
+        child: Text(
+          s.numero.trim(),
+          maxLines: 1,
+          style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: tam * 0.36, height: 1.0),
+        ),
+      ),
+    );
+  }
+}
+
+/// Ventana para escribir un comentario. Crea y libera su propio controlador.
+class _DialogoComentario extends StatefulWidget {
+  const _DialogoComentario({required this.titulo});
+  final String titulo;
+
+  @override
+  State<_DialogoComentario> createState() => _DialogoComentarioState();
+}
+
+class _DialogoComentarioState extends State<_DialogoComentario> {
+  final TextEditingController _ctrl = TextEditingController();
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.titulo, maxLines: 2, overflow: TextOverflow.ellipsis),
+      content: TextField(
+        controller: _ctrl,
+        maxLines: 4,
+        maxLength: 450,
+        decoration: const InputDecoration(hintText: 'Cuéntanos qué está mal o qué se puede mejorar'),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancelar')),
+        FilledButton(onPressed: () => Navigator.pop(context, _ctrl.text), child: const Text('Enviar')),
+      ],
     );
   }
 }
@@ -2608,18 +3199,18 @@ class _EtiquetaEdificio extends StatelessWidget {
   Widget build(BuildContext context) {
     final p = Paleta.of(context);
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4.5),
       decoration: BoxDecoration(
-        color: activa ? p.primario : p.superficie.withValues(alpha: 0.95),
-        borderRadius: BorderRadius.circular(8),
+        color: activa ? p.primario : p.superficie.withValues(alpha: 0.96),
+        borderRadius: BorderRadius.circular(7),
         border: Border.all(
-          color: activa ? Colors.white : p.acento.withValues(alpha: 0.3),
-          width: 1,
+          color: activa ? Colors.white : p.texto.withValues(alpha: 0.14),
+          width: 0.8,
         ),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.25),
-            blurRadius: 4,
+            color: Colors.black.withValues(alpha: 0.18),
+            blurRadius: 3,
             offset: const Offset(0, 1),
           )
         ],
@@ -2630,15 +3221,16 @@ class _EtiquetaEdificio extends StatelessWidget {
         overflow: TextOverflow.ellipsis,
         style: TextStyle(
           fontSize: 11,
-          fontWeight: FontWeight.bold,
-          color: activa ? Colors.white : p.acento,
+          fontWeight: FontWeight.w600,
+          letterSpacing: 0.1,
+          color: activa ? Colors.white : p.texto,
         ),
       ),
     );
   }
 }
 
-// Representa cada salón como un cuadro/rectángulo interactivo en el mapa
+// Representa cada salón como un cuadro interactivo en el mapa (Panel Edición)
 class _CuadroSalonMap extends StatelessWidget {
   const _CuadroSalonMap({
     required this.numero,
@@ -2738,7 +3330,6 @@ class _FotoSalonState extends State<_FotoSalon> {
     _sub?.cancel();
     _sub = ServicioFotos.observar(widget.salon.clave).listen((f) {
       if (!mounted) return;
-      // Evita reconstruir si la foto es la misma que ya se muestra.
       if (f?.marca == _foto?.marca && (f == null) == (_foto == null)) return;
       setState(() => _foto = f);
     });

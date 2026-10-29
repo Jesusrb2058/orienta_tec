@@ -1,0 +1,34 @@
+{
+  "rules": {
+    "mapa": { ".read": true, ".write": "auth != null" },
+    "version_app": { ".read": true, ".write": "auth != null" },
+    "fotos": {
+      "$salon": {
+        ".read": true,
+        ".write": true,
+        ".validate": "newData.hasChildren(['d','t']) && newData.child('d').isString() && newData.child('d').val().length < 900000"
+      }
+    },
+    "estadisticas": {
+      ".read": "auth != null",
+      "$salon": {
+        ".write": true,
+        ".validate": "newData.hasChildren(['n']) && newData.child('n').isNumber() && newData.child('n').val() >= 0 && newData.child('n').val() < 100000000",
+        "n": { ".validate": "newData.isNumber()" },
+        "nombre": { ".validate": "newData.isString() && newData.val().length < 120" },
+        "$otro": { ".validate": false }
+      }
+    },
+    "comentarios": {
+      ".read": "auth != null",
+      "$id": {
+        ".write": "!data.exists()",
+        ".validate": "newData.hasChildren(['texto']) && newData.child('texto').isString() && newData.child('texto').val().length <= 500",
+        "texto": { ".validate": "newData.isString()" },
+        "salon": { ".validate": "newData.isString() && newData.val().length < 150" },
+        "t": { ".validate": "newData.isNumber()" },
+        "$otro": { ".validate": false }
+      }
+    }
+  }
+}

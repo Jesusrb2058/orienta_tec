@@ -2,7 +2,7 @@ name: orienta_tec
 description: "A new Flutter project."
 publish_to: 'none'
 
-version: 1.0.7+8
+version: 1.0.9+10
 
 environment:
   sdk: ^3.13.4
@@ -21,6 +21,8 @@ dependencies:
   package_info_plus: ^10.2.2
   ota_update: ^7.1.0
   firebase_storage: ^12.4.1 # <--- Agregar para almacenar archivos/fotos
+  qr_flutter: ^4.1.0
+  app_links: ^7.2.2
 
 
 dev_dependencies:

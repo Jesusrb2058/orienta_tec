@@ -96,6 +96,8 @@ class Salon {
     this.sid = '',
     this.soloNombre = false,
     this.pin = false,
+    this.icono = '',
+    this.iconoMapa = '',
     this.poligonoImagen = const <Offset>[],
     this.poligonoMapa = const <Offset>[],
   });
@@ -132,6 +134,15 @@ class Salon {
   /// true = es un pin (entrada, cancha, estacionamiento…) y no un bloque.
   /// Su "contorno" es un cuadrito diminuto y se dibuja como marcador.
   final bool pin;
+
+  /// Ícono que se muestra en la cajita del mapa. Vacío = automático (según el
+  /// tipo y nombre); 'numero' = mostrar el nombre sin ícono.
+  final String icono;
+
+  /// Ícono que se dibuja dentro de la cajita sobre el mapa (independiente del
+  /// de la miniatura). Vacío = automático (solo oficinas, cafetería, biblioteca,
+  /// auditorio y baños); 'numero' = mostrar el nombre o número.
+  final String iconoMapa;
 
   /// Llave única del bloque (no cambia aunque se renombre el edificio).
   String get bloque => bid.isNotEmpty ? bid : edificio;
@@ -189,6 +200,8 @@ class Salon {
     String? sid,
     bool? soloNombre,
     bool? pin,
+    String? icono,
+    String? iconoMapa,
     List<Offset>? poligonoImagen,
     List<Offset>? poligonoMapa,
   }) =>
@@ -204,6 +217,8 @@ class Salon {
         sid: sid ?? this.sid,
         soloNombre: soloNombre ?? this.soloNombre,
         pin: pin ?? this.pin,
+        icono: icono ?? this.icono,
+        iconoMapa: iconoMapa ?? this.iconoMapa,
         poligonoImagen: poligonoImagen ?? this.poligonoImagen,
         poligonoMapa: poligonoMapa ?? this.poligonoMapa,
       );
@@ -220,6 +235,8 @@ class Salon {
         if (sid.isNotEmpty) 'sid': sid,
         if (soloNombre) 'soloNombre': true,
         if (pin) 'pin': true,
+        if (icono.isNotEmpty) 'icono': icono,
+        if (iconoMapa.isNotEmpty) 'iconoMapa': iconoMapa,
         'imagen': _ptsAJson(poligonoImagen),
         'mapa': _ptsAJson(poligonoMapa),
       };
@@ -236,6 +253,8 @@ class Salon {
         sid: '${j['sid'] ?? ''}',
         soloNombre: j['soloNombre'] == true,
         pin: j['pin'] == true,
+        icono: '${j['icono'] ?? ''}',
+        iconoMapa: '${j['iconoMapa'] ?? ''}',
         poligonoImagen: _ptsDeJson(j['imagen']),
         poligonoMapa: _ptsDeJson(j['mapa']),
       );
@@ -266,7 +285,7 @@ String nuevoBid() =>
     'b${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}${(_contadorBid++).toRadixString(36)}';
 
 /// Tipos que se pueden elegir para un pin.
-const List<String> tiposPin = ['Entrada', 'Cancha', 'Estacionamiento', 'Otro'];
+const List<String> tiposPin = ['Entrada', 'Cancha', 'Estacionamiento', 'Área verde', 'Punto de reunión', 'Cajero automático', 'Otro'];
 
 /// Medio lado (px del plano) del cuadrito que representa a un pin.
 const double _mitadPin = 1.5;
@@ -474,6 +493,9 @@ class DatosMapa {
 
   String get titulo => textoAjuste('titulo', 'TecNM Campus Orizaba');
   String get subtitulo => textoAjuste('subtitulo', 'Toca un salón o edificio en el mapa');
+
+  /// Aviso para todos los usuarios (vacío = no se muestra).
+  String get aviso => textoAjuste('aviso', '');
 
   String nombrePiso(int piso) => switch (piso) {
         1 => textoAjuste('pisoBaja', 'Planta baja'),

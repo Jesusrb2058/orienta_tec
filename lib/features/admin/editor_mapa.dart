@@ -7,6 +7,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart' show LatLng;
 import 'package:orienta_tec/app/theme/tema_app.dart';
 import 'package:orienta_tec/core/catalogo_campus.dart';
+import 'package:orienta_tec/core/iconos_salon.dart';
 import 'package:orienta_tec/core/mapa_datos.dart';
 import 'package:orienta_tec/core/mapa_repositorio.dart';
 
@@ -951,6 +952,8 @@ class _DialogoSalonState extends State<_DialogoSalon> {
   late final TextEditingController _desc = TextEditingController(text: widget.base.descripcion);
   late final TextEditingController _ind = TextEditingController(text: widget.base.indicaciones.join('\n'));
   late bool _solo = widget.base.soloNombre;
+  late String _icono = widget.base.icono;
+  late String _iconoMapa = widget.base.iconoMapa;
 
   @override
   void dispose() {
@@ -962,6 +965,16 @@ class _DialogoSalonState extends State<_DialogoSalon> {
     _ind.dispose();
     super.dispose();
   }
+
+  List<DropdownMenuItem<String>> _itemsIcono(String auto, String ninguno) => [
+        DropdownMenuItem(value: '', child: Text(auto)),
+        DropdownMenuItem(value: iconoSoloTexto, child: Text(ninguno)),
+        for (final o in opcionesIcono)
+          DropdownMenuItem(
+            value: o.clave,
+            child: Row(children: [Icon(o.icono, size: 20), const SizedBox(width: 10), Text(o.nombre)]),
+          ),
+      ];
 
   void _guardar() {
     final b = widget.base;
@@ -976,6 +989,8 @@ class _DialogoSalonState extends State<_DialogoSalon> {
         tipo: tipo.isEmpty ? 'Aula' : tipo,
         descripcion: _desc.text.trim(),
         soloNombre: _solo,
+        icono: _icono,
+        iconoMapa: _iconoMapa,
         indicaciones: [
           for (final l in _ind.text.split('\n'))
             if (l.trim().isNotEmpty) l.trim(),
@@ -1004,6 +1019,30 @@ class _DialogoSalonState extends State<_DialogoSalon> {
               decoration: const InputDecoration(labelText: 'Columna dentro del bloque (1, 2, 3…)'),
             ),
             TextField(controller: _tipo, decoration: const InputDecoration(labelText: 'Tipo (Aula, Laboratorio, Oficina…)')),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<String>(
+              value: _icono,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                labelText: 'Ícono de la miniatura',
+                helperText: 'Se ve en el buscador, en las listas y en la ficha del salón.',
+                helperMaxLines: 2,
+              ),
+              items: _itemsIcono('Automático (según el tipo)', 'Sin ícono (mostrar el nombre o número)'),
+              onChanged: (v) => setState(() => _icono = v ?? ''),
+            ),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<String>(
+              value: _iconoMapa,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                labelText: 'Ícono sobre el mapa',
+                helperText: 'Se ve dentro de la cajita al acercar el mapa. Automático: solo oficinas, cafetería, biblioteca, auditorio y baños.',
+                helperMaxLines: 3,
+              ),
+              items: _itemsIcono('Automático', 'Número o nombre (sin ícono)'),
+              onChanged: (v) => setState(() => _iconoMapa = v ?? ''),
+            ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               title: const Text('Mostrar solo el nombre'),
@@ -1578,12 +1617,13 @@ class _DialogoAjustesState extends State<_DialogoAjustes> {
   late final TextEditingController _alta = TextEditingController(text: widget.datos.nombrePiso(2));
   late final TextEditingController _velocidad =
       TextEditingController(text: widget.datos.metrosPorMinuto.toStringAsFixed(0));
+  late final TextEditingController _aviso = TextEditingController(text: widget.datos.aviso);
   late final TextEditingController _lat = TextEditingController(text: widget.datos.accesoLat.toString());
   late final TextEditingController _lng = TextEditingController(text: widget.datos.accesoLng.toString());
 
   @override
   void dispose() {
-    for (final c in [_titulo, _subtitulo, _baja, _alta, _velocidad, _lat, _lng]) {
+    for (final c in [_titulo, _subtitulo, _aviso, _baja, _alta, _velocidad, _lat, _lng]) {
       c.dispose();
     }
     super.dispose();
@@ -1595,6 +1635,7 @@ class _DialogoAjustesState extends State<_DialogoAjustes> {
     final r = <String, dynamic>{
       'titulo': _titulo.text.trim(),
       'subtitulo': _subtitulo.text.trim(),
+      'aviso': _aviso.text.trim(),
       'pisoBaja': _baja.text.trim(),
       'pisoAlta': _alta.text.trim(),
     };
@@ -1619,6 +1660,15 @@ class _DialogoAjustesState extends State<_DialogoAjustes> {
           children: [
             TextField(controller: _titulo, decoration: const InputDecoration(labelText: 'Título de la pantalla de inicio')),
             TextField(controller: _subtitulo, decoration: const InputDecoration(labelText: 'Subtítulo')),
+            TextField(
+              controller: _aviso,
+              maxLines: 2,
+              decoration: const InputDecoration(
+                labelText: 'Aviso para los usuarios (opcional)',
+                helperText: 'Ej. "Baños del edificio E cerrados hoy". Déjalo vacío para quitarlo.',
+                helperMaxLines: 2,
+              ),
+            ),
             TextField(controller: _baja, decoration: const InputDecoration(labelText: 'Nombre del piso 1')),
             TextField(controller: _alta, decoration: const InputDecoration(labelText: 'Nombre del piso 2')),
             TextField(
@@ -1707,63 +1757,89 @@ class PanelEditor extends StatelessWidget {
       listenable: editor,
       builder: (context, _) => Container(
         width: double.infinity,
-        padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 14),
         decoration: BoxDecoration(
           color: p.superficie,
-          borderRadius: BorderRadius.circular(24),
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(26), bottom: Radius.circular(22)),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withValues(alpha: p.oscuro ? 0.5 : 0.18),
-              blurRadius: 24,
+              color: Colors.black.withValues(alpha: p.oscuro ? 0.5 : 0.2),
+              blurRadius: 26,
               offset: const Offset(0, 8),
             ),
           ],
         ),
-        child: Column(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(context).height * 0.5),
+          child: SingleChildScrollView(
+            child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _herramientas(context),
-            const SizedBox(height: 6),
+            Center(
+              child: Container(
+                width: 38,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 8),
+                decoration: BoxDecoration(color: p.divisor, borderRadius: BorderRadius.circular(2)),
+              ),
+            ),
+            _encabezado(context, p),
+            const SizedBox(height: 10),
+            _herramientas(p),
+            const SizedBox(height: 10),
             _contexto(context, p),
-            const SizedBox(height: 8),
+            const SizedBox(height: 10),
             _pie(context, p),
           ],
-        ),
-      ),
-    );
-  }
-
-  Widget _chipHerramienta(Herramienta h, IconData icono, String texto) {
-    return Padding(
-      padding: const EdgeInsets.only(right: 8),
-      child: ChoiceChip(
-        avatar: Icon(icono, size: 18),
-        label: Text(texto),
-        selected: editor.herramienta == h,
-        onSelected: (_) => editor.elegirHerramienta(h),
-      ),
-    );
-  }
-
-  Widget _herramientas(BuildContext context) {
-    return Row(
-      children: [
-        Expanded(
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: [
-                _chipHerramienta(Herramienta.editar, Icons.edit_location_alt_outlined, 'Editar'),
-                _chipHerramienta(Herramienta.nuevoSalon, Icons.crop_square, 'Nuevo bloque'),
-                _chipHerramienta(Herramienta.nuevoPin, Icons.place_outlined, 'Nuevo pin'),
-                _chipHerramienta(Herramienta.nuevaRuta, Icons.timeline, 'Nueva ruta'),
-              ],
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  // ------------------------------------------------------------ encabezado
+  Widget _encabezado(BuildContext context, Paleta p) {
+    final sucio = editor.sucio;
+    final Color colorEstado = sucio ? _ambar : p.verde;
+    final String estado = sucio
+        ? 'Cambios sin publicar'
+        : (repositorioMapa.remotoConfigurado ? 'Todo publicado' : 'Solo local (sin servidor)');
+    return Row(
+      children: [
+        Container(
+          width: 38,
+          height: 38,
+          decoration: BoxDecoration(color: p.primario.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(12)),
+          child: Icon(Icons.admin_panel_settings_outlined, color: p.acento, size: 22),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Modo administrador', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: p.acento)),
+              const SizedBox(height: 2),
+              Row(
+                children: [
+                  Icon(sucio ? Icons.circle : Icons.check_circle, size: 11, color: colorEstado),
+                  const SizedBox(width: 5),
+                  Flexible(
+                    child: Text(estado, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, color: p.textoSec)),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
         IconButton(
-          tooltip: 'Deshacer',
+          tooltip: '¿Cómo funciona?',
+          onPressed: () => _ayuda(context),
+          icon: const Icon(Icons.help_outline),
+        ),
+        IconButton(
+          tooltip: 'Deshacer el último cambio',
           onPressed: editor.puedeDeshacer ? editor.deshacer : null,
           icon: const Icon(Icons.undo),
         ),
@@ -1771,232 +1847,419 @@ class PanelEditor extends StatelessWidget {
           tooltip: 'Más opciones',
           onSelected: (v) => _menu(context, v),
           itemBuilder: (_) => const [
-            PopupMenuItem(value: 'revisar', child: Text('Revisar rutas y salones')),
-            PopupMenuItem(value: 'ajustes', child: Text('Textos y ajustes de la app')),
-            PopupMenuItem(value: 'catalogo', child: Text('Cargar catálogo inicial (Cómputo, Idiomas, Industrial)')),
-            PopupMenuItem(value: 'exportar', child: Text('Copiar JSON')),
-            PopupMenuItem(value: 'importar', child: Text('Importar JSON')),
-            PopupMenuItem(value: 'descartar', child: Text('Descartar cambios y cargar lo publicado')),
+            PopupMenuItem(value: 'revisar', child: _ItemMenu(Icons.fact_check_outlined, 'Revisar rutas y salones')),
+            PopupMenuItem(value: 'ajustes', child: _ItemMenu(Icons.tune, 'Textos y ajustes de la app')),
+            PopupMenuDivider(),
+            PopupMenuItem(value: 'catalogo', child: _ItemMenu(Icons.library_add_outlined, 'Cargar catálogo inicial')),
+            PopupMenuItem(value: 'exportar', child: _ItemMenu(Icons.copy_all_outlined, 'Copiar respaldo (JSON)')),
+            PopupMenuItem(value: 'importar', child: _ItemMenu(Icons.file_download_outlined, 'Importar respaldo (JSON)')),
+            PopupMenuDivider(),
+            PopupMenuItem(value: 'descartar', child: _ItemMenu(Icons.restore, 'Descartar cambios y cargar lo publicado')),
           ],
         ),
       ],
     );
   }
 
-  Widget _contexto(BuildContext context, Paleta p) {
-    final estilo = TextStyle(color: p.textoSec, fontSize: 13);
-    switch (editor.herramienta) {
-      case Herramienta.nuevoSalon:
-        final n = editor.trazo.length;
-        final String pista;
-        if (editor.rectangulo) {
-          pista = n == 0
-              ? 'Toca una esquina del bloque.'
-              : (n == 1 ? 'Toca la esquina opuesta.' : 'Contorno listo.');
-        } else {
-          pista = '$n punto${n == 1 ? '' : 's'}: toca cada esquina del bloque.';
-        }
-        return Wrap(
-          spacing: 8,
-          runSpacing: 4,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            ChoiceChip(
-              label: const Text('Rectángulo'),
-              selected: editor.rectangulo,
-              onSelected: (_) => editor.alternarRectangulo(true),
-            ),
-            ChoiceChip(
-              label: const Text('Polígono'),
-              selected: !editor.rectangulo,
-              onSelected: (_) => editor.alternarRectangulo(false),
-            ),
-            Text('$pista (vista ${imagen ? 'satélite' : 'mapa'})', style: estilo),
-            if (!editor.rectangulo && n > 0)
-              TextButton.icon(onPressed: editor.quitarUltimoPunto, icon: const Icon(Icons.backspace_outlined, size: 18), label: const Text('Quitar punto')),
-            if (editor.contornoListo)
-              FilledButton.tonalIcon(
-                onPressed: () => crearSalonDibujado(context, editor),
-                icon: const Icon(Icons.check),
-                label: const Text('Terminar'),
+  // ----------------------------------------------------------- herramientas
+  Widget _botonHerramienta(Paleta p, Herramienta h, IconData icono, String texto, String ayuda) {
+    final sel = editor.herramienta == h;
+    return Expanded(
+      child: Tooltip(
+        message: ayuda,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 3),
+          child: Material(
+            color: sel ? p.primario.withValues(alpha: 0.16) : p.chip,
+            borderRadius: BorderRadius.circular(14),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(14),
+              onTap: () => editor.elegirHerramienta(h),
+              child: Container(
+                padding: const EdgeInsets.symmetric(vertical: 9),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: sel ? p.primario : Colors.transparent, width: 1.5),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(icono, size: 22, color: sel ? p.acento : p.textoSec),
+                    const SizedBox(height: 3),
+                    Text(
+                      texto,
+                      style: TextStyle(fontSize: 12, fontWeight: sel ? FontWeight.w700 : FontWeight.w500, color: sel ? p.acento : p.textoSec),
+                    ),
+                  ],
+                ),
               ),
-            if (n > 0) TextButton(onPressed: editor.cancelarTrazo, child: const Text('Cancelar')),
-          ],
-        );
-      case Herramienta.nuevoPin:
-        return Text(
-          'Toca el mapa donde va el pin (entrada, cancha, estacionamiento…).',
-          style: estilo,
-        );
-      case Herramienta.nuevaRuta:
-        final n = editor.trazo.length;
-        return Wrap(
-          spacing: 8,
-          runSpacing: 4,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            Text(
-              n == 0
-                  ? 'Toca el mapa para marcar el inicio. Si tocas cerca de otra ruta se conecta sola.'
-                  : '$n punto${n == 1 ? '' : 's'}. Sigue tocando; termina en otra ruta para conectarla.',
-              style: estilo,
             ),
-            if (n > 0)
-              TextButton.icon(onPressed: editor.quitarUltimoPunto, icon: const Icon(Icons.backspace_outlined, size: 18), label: const Text('Quitar punto')),
-            if (n >= 2)
-              FilledButton.tonalIcon(
-                onPressed: editor.terminarRuta,
-                icon: const Icon(Icons.check),
-                label: const Text('Terminar ruta'),
-              ),
-            if (n > 0) TextButton(onPressed: editor.cancelarTrazo, child: const Text('Cancelar')),
-          ],
-        );
-      case Herramienta.editar:
-        if (editor.hayBloqueSel) return _contextoBloque(context, estilo);
-        final cam = editor.caminoSeleccionado;
-        if (cam != null) return _contextoRuta(cam, estilo);
-        return Text('Toca un bloque o una ruta para editarlo.', style: estilo);
-    }
+          ),
+        ),
+      ),
+    );
   }
 
-  Widget _contextoPin(BuildContext context, TextStyle estilo) {
-    final pin = editor.salonesSel.first;
-    return Wrap(
-      spacing: 8,
-      runSpacing: 4,
-      crossAxisAlignment: WrapCrossAlignment.center,
+  Widget _herramientas(Paleta p) {
+    return Row(
       children: [
-        Text('Pin · ${pin.numero} (${pin.tipo})', style: estilo.copyWith(fontWeight: FontWeight.w700)),
-        if (editor.moviendoPin) ...[
-          Text('Toca el mapa para colocarlo en su nuevo lugar.', style: estilo),
-          TextButton(onPressed: editor.cancelarMoverPin, child: const Text('Cancelar')),
-        ] else ...[
-          FilledButton.tonalIcon(
-            onPressed: () => editarPinDialogo(context, editor, pin),
-            icon: const Icon(Icons.edit_outlined, size: 18),
-            label: const Text('Editar'),
-          ),
-          TextButton.icon(
-            onPressed: editor.iniciarMoverPin,
-            icon: const Icon(Icons.open_with, size: 18),
-            label: const Text('Mover'),
-          ),
-          TextButton.icon(
-            onPressed: () => _confirmar(context, '¿Eliminar el pin ${pin.numero}?', editor.eliminarBloqueSeleccionado),
-            icon: const Icon(Icons.delete_outline, size: 18),
-            label: const Text('Eliminar'),
-          ),
-        ],
+        _botonHerramienta(p, Herramienta.editar, Icons.touch_app_outlined, 'Editar', 'Elegir y modificar lo que ya existe'),
+        _botonHerramienta(p, Herramienta.nuevoSalon, Icons.add_box_outlined, 'Bloque', 'Dibujar un edificio o bloque nuevo'),
+        _botonHerramienta(p, Herramienta.nuevoPin, Icons.add_location_alt_outlined, 'Pin', 'Marcar una entrada, cancha, estacionamiento, área verde o punto de reunión'),
+        _botonHerramienta(p, Herramienta.nuevaRuta, Icons.timeline, 'Ruta', 'Trazar un camino peatonal'),
       ],
     );
   }
 
-  Widget _contextoBloque(BuildContext context, TextStyle estilo) {
-    if (editor.pinSel) return _contextoPin(context, estilo);
+  // ------------------------------------------------- tarjeta "qué hago ahora"
+  Widget _tarjeta(
+    Paleta p, {
+    required IconData icono,
+    required String titulo,
+    required String texto,
+    Widget? extra,
+    List<Widget> acciones = const [],
+  }) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
+      decoration: BoxDecoration(color: p.chip, borderRadius: BorderRadius.circular(16)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 34,
+                height: 34,
+                decoration: BoxDecoration(color: p.primario.withValues(alpha: 0.14), shape: BoxShape.circle),
+                child: Icon(icono, size: 19, color: p.acento),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(titulo, style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w700, color: p.texto)),
+                    const SizedBox(height: 2),
+                    Text(texto, style: TextStyle(fontSize: 13, height: 1.3, color: p.textoSec)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          if (extra != null) ...[const SizedBox(height: 8), extra],
+          if (acciones.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Wrap(spacing: 8, runSpacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: acciones),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _botonPeligro(BuildContext context, String texto, VoidCallback alPulsar) {
+    final c = Theme.of(context).colorScheme.error;
+    return TextButton.icon(
+      onPressed: alPulsar,
+      style: TextButton.styleFrom(foregroundColor: c),
+      icon: const Icon(Icons.delete_outline, size: 18),
+      label: Text(texto),
+    );
+  }
+
+  Widget _contexto(BuildContext context, Paleta p) {
+    switch (editor.herramienta) {
+      case Herramienta.nuevoSalon:
+        final n = editor.trazo.length;
+        final String paso;
+        if (editor.rectangulo) {
+          paso = n == 0
+              ? 'Paso 1 de 2 · Toca una esquina del bloque.'
+              : (n == 1 ? 'Paso 2 de 2 · Toca la esquina opuesta.' : 'Contorno listo · pulsa «Terminar» para escribir sus salones.');
+        } else {
+          paso = n < 3
+              ? 'Toca cada esquina del bloque ($n de mínimo 3).'
+              : '$n puntos · sigue tocando esquinas o pulsa «Terminar».';
+        }
+        return _tarjeta(
+          p,
+          icono: Icons.add_box_outlined,
+          titulo: 'Dibujar un bloque nuevo',
+          texto: '$paso\nDibujas sobre la vista ${imagen ? 'satélite' : 'de mapa'}.',
+          extra: Wrap(
+            spacing: 8,
+            children: [
+              ChoiceChip(
+                label: const Text('Rectángulo (2 toques)'),
+                selected: editor.rectangulo,
+                onSelected: (_) => editor.alternarRectangulo(true),
+              ),
+              ChoiceChip(
+                label: const Text('Polígono (varias esquinas)'),
+                selected: !editor.rectangulo,
+                onSelected: (_) => editor.alternarRectangulo(false),
+              ),
+            ],
+          ),
+          acciones: [
+            if (editor.contornoListo)
+              FilledButton.icon(
+                onPressed: () => crearSalonDibujado(context, editor),
+                icon: const Icon(Icons.check),
+                label: const Text('Terminar'),
+              ),
+            if (!editor.rectangulo && n > 0)
+              TextButton.icon(onPressed: editor.quitarUltimoPunto, icon: const Icon(Icons.backspace_outlined, size: 18), label: const Text('Quitar punto')),
+            if (n > 0) TextButton(onPressed: editor.cancelarTrazo, child: const Text('Cancelar')),
+          ],
+        );
+      case Herramienta.nuevoPin:
+        return _tarjeta(
+          p,
+          icono: Icons.add_location_alt_outlined,
+          titulo: 'Colocar un pin',
+          texto: 'Toca en el mapa el punto exacto (entrada, cancha, estacionamiento…). Después te pediré su nombre y tipo.',
+        );
+      case Herramienta.nuevaRuta:
+        final n = editor.trazo.length;
+        return _tarjeta(
+          p,
+          icono: Icons.timeline,
+          titulo: 'Trazar una ruta (camino peatonal)',
+          texto: n == 0
+              ? 'Paso 1 · Toca el mapa para marcar el inicio. Si tocas cerca de otra ruta, se conecta sola.'
+              : '$n punto${n == 1 ? '' : 's'} · sigue tocando por donde se camina. Termina sobre otra ruta para conectarla.',
+          acciones: [
+            if (n >= 2)
+              FilledButton.icon(onPressed: editor.terminarRuta, icon: const Icon(Icons.check), label: const Text('Terminar ruta')),
+            if (n > 0)
+              TextButton.icon(onPressed: editor.quitarUltimoPunto, icon: const Icon(Icons.backspace_outlined, size: 18), label: const Text('Quitar punto')),
+            if (n > 0) TextButton(onPressed: editor.cancelarTrazo, child: const Text('Cancelar')),
+          ],
+        );
+      case Herramienta.editar:
+        if (editor.hayBloqueSel) return _contextoBloque(context, p);
+        final cam = editor.caminoSeleccionado;
+        if (cam != null) return _contextoRuta(context, p, cam);
+        return _tarjeta(
+          p,
+          icono: Icons.touch_app_outlined,
+          titulo: 'Toca algo para editarlo',
+          texto: 'Un bloque (renombrarlo, editar sus salones o mover sus esquinas), un pin, o la línea de una ruta. '
+              'Para agregar algo nuevo usa Bloque, Pin o Ruta.',
+        );
+    }
+  }
+
+  Widget _contextoPin(BuildContext context, Paleta p) {
+    final pin = editor.salonesSel.first;
+    if (editor.moviendoPin) {
+      return _tarjeta(
+        p,
+        icono: Icons.open_with,
+        titulo: 'Mover «${pin.numero}»',
+        texto: 'Toca el mapa donde quieres colocarlo.',
+        acciones: [TextButton(onPressed: editor.cancelarMoverPin, child: const Text('Cancelar'))],
+      );
+    }
+    return _tarjeta(
+      p,
+      icono: Icons.place_outlined,
+      titulo: 'Pin · ${pin.numero}',
+      texto: 'Tipo: ${pin.tipo}.',
+      acciones: [
+        FilledButton.tonalIcon(
+          onPressed: () => editarPinDialogo(context, editor, pin),
+          icon: const Icon(Icons.edit_outlined, size: 18),
+          label: const Text('Editar'),
+        ),
+        TextButton.icon(onPressed: editor.iniciarMoverPin, icon: const Icon(Icons.open_with, size: 18), label: const Text('Mover')),
+        _botonPeligro(
+          context,
+          'Eliminar',
+          () => _confirmar(context, '¿Eliminar el pin ${pin.numero}?', editor.eliminarBloqueSeleccionado),
+        ),
+      ],
+    );
+  }
+
+  Widget _contextoBloque(BuildContext context, Paleta p) {
+    if (editor.pinSel) return _contextoPin(context, p);
     final llave = editor.bloqueSel!;
     final nombre = editor.datos.nombreBloque(llave);
     final salones = editor.salonesSel;
     final propio = editor.contornoPropio(imagen);
     final v = editor.verticeSel;
     final pts = editor.contornoSel(imagen);
-    return Wrap(
-      spacing: 8,
-      runSpacing: 4,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      children: [
-        Text('$nombre · ${salones.length} salones', style: estilo.copyWith(fontWeight: FontWeight.w700)),
-        if (!propio) Text('(usa el contorno de la otra vista; al moverlo se crea el de esta)', style: estilo),
-        if (v != null) ...[
-          Text('Toca el mapa para mover el punto.', style: estilo),
+    if (v != null) {
+      return _tarjeta(
+        p,
+        icono: Icons.adjust,
+        titulo: 'Moviendo una esquina de $nombre',
+        texto: 'Toca el mapa donde debe quedar el punto.',
+        acciones: [
           TextButton.icon(
             onPressed: pts.length > 3 ? () => editor.quitarVerticeElegido(imagen: imagen) : null,
             icon: const Icon(Icons.remove_circle_outline, size: 18),
             label: const Text('Quitar punto'),
           ),
           TextButton(onPressed: editor.cancelarVertice, child: const Text('Cancelar')),
-        ] else ...[
-          Text('Toca un punto para moverlo o un círculo vacío para agregar uno.', style: estilo),
-          FilterChip(
-            label: const Text('Solo nombre'),
-            tooltip: 'Muestra "Biblioteca" en vez de "Salón Biblioteca"',
-            selected: salones.every((s) => s.soloNombre),
-            onSelected: (v) => editor.fijarSoloNombre(llave, v),
-          ),
-          FilledButton.tonalIcon(
-            onPressed: () => gestionarSalones(context, editor, llave),
-            icon: const Icon(Icons.meeting_room_outlined, size: 18),
-            label: const Text('Salones'),
-          ),
-          TextButton.icon(
-            onPressed: () => editarNombreBloque(context, editor, llave),
-            icon: const Icon(Icons.edit_outlined, size: 18),
-            label: const Text('Nombre'),
-          ),
-          TextButton.icon(
-            onPressed: () => _confirmar(
-              context,
-              '¿Eliminar el bloque $nombre y sus ${salones.length} salones?',
-              editor.eliminarBloqueSeleccionado,
-            ),
-            icon: const Icon(Icons.delete_outline, size: 18),
-            label: const Text('Eliminar bloque'),
-          ),
         ],
+      );
+    }
+    return _tarjeta(
+      p,
+      icono: Icons.apartment_outlined,
+      titulo: '$nombre · ${salones.length} salones',
+      texto: 'Toca un punto del contorno para moverlo, o un círculo vacío para agregar una esquina.'
+          '${propio ? '' : '\nUsa el contorno de la otra vista; al moverlo se crea el de esta.'}',
+      acciones: [
+        FilledButton.icon(
+          onPressed: () => gestionarSalones(context, editor, llave),
+          icon: const Icon(Icons.meeting_room_outlined, size: 18),
+          label: const Text('Salones'),
+        ),
+        FilledButton.tonalIcon(
+          onPressed: () => editarNombreBloque(context, editor, llave),
+          icon: const Icon(Icons.edit_outlined, size: 18),
+          label: const Text('Nombre'),
+        ),
+        FilterChip(
+          label: const Text('Solo nombre'),
+          tooltip: 'Muestra "Biblioteca" en vez de "Salón Biblioteca"',
+          selected: salones.every((s) => s.soloNombre),
+          onSelected: (v) => editor.fijarSoloNombre(llave, v),
+        ),
+        _botonPeligro(
+          context,
+          'Eliminar bloque',
+          () => _confirmar(context, '¿Eliminar el bloque $nombre y sus ${salones.length} salones?', editor.eliminarBloqueSeleccionado),
+        ),
       ],
     );
   }
 
-  Widget _contextoRuta(List<Offset> cam, TextStyle estilo) {
+  Widget _contextoRuta(BuildContext context, Paleta p, List<Offset> cam) {
     final v = editor.verticeSel;
-    return Wrap(
-      spacing: 8,
-      runSpacing: 4,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      children: [
-        Text('Ruta de ${cam.length} puntos', style: estilo.copyWith(fontWeight: FontWeight.w700)),
-        if (v != null) ...[
-          Text('Toca el mapa para mover el punto (se mueve también en las rutas que cruzan ahí).', style: estilo),
+    if (v != null) {
+      return _tarjeta(
+        p,
+        icono: Icons.adjust,
+        titulo: 'Moviendo un punto de la ruta',
+        texto: 'Toca el mapa donde debe quedar. También se mueve en las rutas que cruzan por ahí.',
+        acciones: [
           TextButton.icon(
             onPressed: cam.length > 2 ? () => editor.quitarVerticeElegido(imagen: imagen) : null,
             icon: const Icon(Icons.remove_circle_outline, size: 18),
             label: const Text('Quitar punto'),
           ),
           TextButton(onPressed: editor.cancelarVertice, child: const Text('Cancelar')),
-        ] else ...[
-          Text('Toca un punto para moverlo o un círculo vacío para agregar uno.', style: estilo),
-          Builder(
-            builder: (context) => TextButton.icon(
-              onPressed: () => _confirmar(context, '¿Eliminar esta ruta completa?', editor.eliminarCaminoSeleccionado),
-              icon: const Icon(Icons.delete_outline, size: 18),
-              label: const Text('Eliminar ruta'),
-            ),
-          ),
         ],
+      );
+    }
+    return _tarjeta(
+      p,
+      icono: Icons.timeline,
+      titulo: 'Ruta de ${cam.length} puntos',
+      texto: 'Toca un punto para moverlo o un círculo vacío para agregar uno.',
+      acciones: [
+        _botonPeligro(context, 'Eliminar ruta', () => _confirmar(context, '¿Eliminar esta ruta completa?', editor.eliminarCaminoSeleccionado)),
       ],
     );
   }
 
+  // ------------------------------------------------------------------- pie
   Widget _pie(BuildContext context, Paleta p) {
-    final String estado;
-    if (editor.sucio) {
-      estado = 'Cambios sin publicar';
-    } else if (repositorioMapa.remotoConfigurado) {
-      estado = 'Todo publicado';
-    } else {
-      estado = 'Sin servidor configurado (solo local)';
-    }
-    return Row(
-      children: [
-        Icon(editor.sucio ? Icons.circle : Icons.check_circle_outline, size: 14, color: editor.sucio ? _ambar : p.verde),
-        const SizedBox(width: 6),
-        Expanded(child: Text(estado, style: TextStyle(color: p.textoSec, fontSize: 12))),
-        FilledButton.icon(
-          onPressed: editor.sucio ? () => _publicar(context) : null,
-          icon: const Icon(Icons.cloud_upload_outlined),
-          label: const Text('Publicar'),
+    final sucio = editor.sucio;
+    return SizedBox(
+      width: double.infinity,
+      child: FilledButton.icon(
+        onPressed: sucio ? () => _publicar(context) : null,
+        style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 13)),
+        icon: const Icon(Icons.cloud_upload_outlined),
+        label: Text(sucio ? 'Publicar cambios para los usuarios' : 'Todo publicado'),
+      ),
+    );
+  }
+
+  // ------------------------------------------------------------------ ayuda
+  Future<void> _ayuda(BuildContext context) {
+    final p = Paleta.of(context);
+    Widget item(IconData icono, String titulo, String texto) => Padding(
+          padding: const EdgeInsets.only(bottom: 14),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(color: p.primario.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(12)),
+                child: Icon(icono, size: 21, color: p.acento),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(titulo, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: p.texto)),
+                    const SizedBox(height: 2),
+                    Text(texto, style: TextStyle(fontSize: 13.5, height: 1.35, color: p.textoSec)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+    return showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: p.superficie,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(26))),
+      builder: (ctx) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.78,
+        minChildSize: 0.4,
+        maxChildSize: 0.95,
+        builder: (ctx, scroll) => ListView(
+          controller: scroll,
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+          children: [
+            Center(
+              child: Container(
+                width: 38,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 14),
+                decoration: BoxDecoration(color: p.divisor, borderRadius: BorderRadius.circular(2)),
+              ),
+            ),
+            Text('¿Cómo funciona?', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: p.acento)),
+            const SizedBox(height: 4),
+            Text(
+              'Todo lo que hagas aquí se guarda en tu equipo. Los usuarios solo lo ven cuando pulses «Publicar».',
+              style: TextStyle(fontSize: 13.5, height: 1.35, color: p.textoSec),
+            ),
+            const SizedBox(height: 18),
+            item(Icons.touch_app_outlined, 'Editar',
+                'Toca un bloque para renombrarlo, cambiar sus salones (nombre, piso, ícono, “Cómo llegar”) o mover sus esquinas. También sirve con pines y rutas.'),
+            item(Icons.add_box_outlined, 'Bloque',
+                'Dibuja un edificio: dos toques (rectángulo) o una esquina por toque (polígono). Al terminar escribe sus salones, por ejemplo «101-106, Baños, Oficina».'),
+            item(Icons.add_location_alt_outlined, 'Pin',
+                'Marca un lugar suelto: entrada, cancha, estacionamiento u otro. Se ve como un marcador y también se puede buscar.'),
+            item(Icons.timeline, 'Ruta',
+                'Traza por dónde se camina. Las rutas se conectan entre sí al tocar cerca de otra; los salones solo se alcanzan si hay un camino conectado a la entrada.'),
+            item(Icons.fact_check_outlined, 'Revisar',
+                'En el menú (⋮) usa «Revisar rutas y salones» antes de publicar: avisa de salones sin contorno o sin camino.'),
+            item(Icons.layers_outlined, 'Mapa o satélite',
+                'Dibujas sobre la vista que tengas activa (botón del globo). Cada vista guarda su propio contorno.'),
+            item(Icons.undo, 'Deshacer',
+                'La flecha ↶ regresa el último cambio. «Descartar cambios» (menú) vuelve a lo ya publicado.'),
+            item(Icons.cloud_upload_outlined, 'Publicar',
+                'Envía el mapa a los usuarios. El estado aparece arriba: naranja = cambios sin publicar, verde = todo publicado.'),
+          ],
         ),
-      ],
+      ),
     );
   }
 
@@ -2131,4 +2394,19 @@ class PanelEditor extends StatelessWidget {
         });
     }
   }
+}
+
+class _ItemMenu extends StatelessWidget {
+  const _ItemMenu(this.icono, this.texto);
+  final IconData icono;
+  final String texto;
+
+  @override
+  Widget build(BuildContext context) => Row(
+        children: [
+          Icon(icono, size: 20),
+          const SizedBox(width: 12),
+          Flexible(child: Text(texto)),
+        ],
+      );
 }
